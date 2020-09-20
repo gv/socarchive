@@ -35,7 +35,7 @@ util.inherits(Entry, EventEmitter);
 
 function Entry(ep, dir, options) {
 	if (!new.target)
-		return new Entry(ep);
+		return new Entry(ep, dir, options);
 	this.parts = ep.split(new RegExp(`\\${path.sep}+`, "g"));
 	this.path = ep;
 	this.options = options;
@@ -53,7 +53,6 @@ Entry.prototype.getDirName = function() {
 	for (let i = this.parts.length - 2; i >= 0; i--) {
 		p.unshift(this.parts[i]);
 		let words = this.parts[i].split(/[^A-Za-z]+/g);
-		verb("words=%j", words);
 		words = words.filter(x => !x.match(/season|series|^$/i));
 		if (words.length)
 			break;
@@ -62,7 +61,7 @@ Entry.prototype.getDirName = function() {
 };
 
 Entry.prototype.getName1 = function() {
-	return this.parts[this.parts.length -1].replace(/[.][^.]+$/, "");
+	return this.parts[this.parts.length - 1].replace(/[.][^.]+$/, "");
 };
 
 Entry.prototype.getName = function() {
@@ -128,6 +127,8 @@ ${JSON.stringify(sns)}`));
 Entry.prototype.getUploadable = function(cb) {
 	if (this.options.internal) {
 		return void this.getHardsub(this.path, path.basename(this.path), cb);
+	} else if ("none" === this.options.srt) {
+		return void cb(null, this.path);
 	} else if (this.options.srt) {
 		getSubtitleName(this, (e, r) => {
 			if (e)
@@ -148,7 +149,8 @@ Entry.prototype.getTmpDirPath = function() {
 };
 
 Entry.prototype.releaseUploadable = function(tmpPath) {
-	this.deleteTmpFileSync(tmpPath);
+	if ("none" !== this.options.srt)
+		this.deleteTmpFileSync(tmpPath);
 };
 
 Entry.prototype.deleteTmpFileSync = function(tmp) {
@@ -306,50 +308,59 @@ SocArrange.prototype.runIfAccessOk = function(cb) {
 			}
 		});
 	} else {
-		if (!this.options.srt)
+		if (0 && !this.options.srt)
 			return void cb(new TypeError("\
 Uploading without subtitles disabled; to \
 engage internal subs, use --internal --srt LANG")); 
-		this.loadingArchiveState = new EventEmitter();
-		this.loadArchiveState((e, r) => {
-			if (e)
-				return void(cb(e));
-			this.loadingArchiveState.emit("done");
-			delete this.loadingArchiveState;
-		});
-		this.loadFiles(e => {
-			if (e)
-				return void(cb(e));
-			if (!this.loadingArchiveState)
-				return void(this.uploadEverything(cb));
-			this.loadingArchiveState.on(
-				"done", () => this.uploadEverything(cb));
-		});
+		this.loadArchiveState(cb);
+		this.loadFiles(cb);
 	}
+};
+
+SocArrange.prototype.handleLoadComplete = function(e, cb) {
+	if (this.error)
+		return;
+	if (e)
+		return void cb(this.error = e);
+	if (this.albums && (
+		this.count.files.loaded >= this.count.files.target))
+		this.uploadEverything(cb);
+};
+
+SocArrange.prototype.loadArchiveState = function(cb) {
+	const albums = {};
+	this.count.albums = 0;
+	this.method("video.getAlbums")({}, (e, r) => {
+		if (e)
+			return void this.handleLoadComplete(e, cb);
+		if (~~r.response.count < r.response.items.length)
+			throw "TODO";
+		for (let a of r.response.items) {
+			albums[a.title] = a;
+			this.count.albums++;
+		}
+		this.albums = albums;
+		this.handleLoadComplete(null, cb);
+	});
 };
 
 SocArrange.prototype.loadFiles = function(cb) {
 	this.count.files = {target: 0, loaded: 0};
 	this.files = [];
 	for(var p of this.options.args)
-		this.load(p, null, out);
-	function out(e) {
-		if (cb)
-			process.nextTick(cb, e)
-		cb = null
-	}
+		this.load(p, null, this.options, cb);
 };
 
-SocArrange.prototype.load = function(p, dir, cb) {
+SocArrange.prototype.load = function(p, dir, options, cb) {
 	this.count.files.target++;
 	fs.stat(p, (e, s) => {
 		if (e)
-			return void(cb(e));
+			return void this.handleLoadComplete(e, cb);
 		if (s.isDirectory()) {
 			fs.readdir(p, (e, list) => {
-				const newDir = new Directory();
 				if (e)
-					return void(cb(e));
+					return void this.handleLoadComplete(e, cb);
+				const newDir = new Directory();
 				this.count.files.target--;
 				if (this.options.reverse)
 					list = list.reverse();
@@ -357,41 +368,69 @@ SocArrange.prototype.load = function(p, dir, cb) {
 					if (n.match("^._"))
 						continue;
 					if (n.match("[.](mp4|divx|avi)$")) {
-						this.load(path.join(p, n), newDir, cb);
+						this.load(path.join(p, n), newDir, options, cb);
 					} else if (n.match("[.]srt$")) {
 						newDir.subtitleNames.push(n);
 						this.count.subtitles++;
 					}
 				}
-				checkSuccess(this.count);
+				this.handleLoadComplete(null, cb);
 			});
+		} else if (p.match("[.]json")) {
+			this.loadConfig(p, cb);
 		} else {
-			this.files.push(new Entry(p, dir, this.options));
+			let effOpts = options, newOpts;
+			if (effOpts.exceptions) {
+				for (let n of p.split(path.sep)) {
+					if (newOpts = effOpts.exceptions[n]) {
+						Object.setPrototypeOf(newOpts, effOpts);
+						effOpts = newOpts;
+					}
+				}
+			}
+			this.files.push(new Entry(p, dir, effOpts));
 			this.count.files.loaded++;
-			checkSuccess(this.count);
+			this.handleLoadComplete(null, cb);
 		}
 	});
 
-	function checkSuccess(count) {
-		if (count.files.loaded >= count.files.target)
-			cb();
-	}
 };
 
-SocArrange.prototype.loadArchiveState = function(cb) {
-	this.albums = {};
-	this.count.albums = 0;
-	this.method("video.getAlbums")({}, (e, r) => {
-		if (e)
-			return void(cb(e));
-		if (~~r.response.count < r.response.items.length)
-			throw "TODO";
-		for (let a of r.response.items) {
-			this.albums[a.title] = a;
-			this.count.albums++;
-		}
-		cb(null);
-	});
+SocArrange.prototype.loadConfig = function(p, cb) {
+	/*
+	  config:
+
+	  {
+	   "dir1": {
+	    "srt": "FR",
+	    "exceptions": {
+	     "subdir1": {"internal": true},
+	     "basename1": {"srt": "none"}
+	    }
+	   },
+	   "dir2": {
+	   ...
+	   },
+	   ...,
+	   "options": {
+	    "srt": "EN",
+	   }
+	  }
+	*/
+	const conf = JSON.parse(fs.readFileSync(p));
+	const options = conf.options || {};
+	Object.setPrototypeOf(options, this.options);
+	for (let k in conf) {
+		if (k === "options")
+			continue;
+		const c = conf[k];
+		const sourcePath = path.join(p, "..", k);
+		Object.setPrototypeOf(c, options);
+		// this will increase target count 
+		this.load(sourcePath, null, c, cb);
+	}
+	this.count.files.loaded++;
+	this.handleLoadComplete(null, cb);
 };
 
 SocArrange.prototype.uploadEverything = function(cb) {
