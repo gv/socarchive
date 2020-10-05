@@ -322,6 +322,7 @@ SocArrange.prototype.handleLoadComplete = function(e, cb) {
 		return;
 	if (e)
 		return void cb(this.error = e);
+	// verb("count.files=%j", this.count.files);
 	if (this.albums && (
 		this.count.files.loaded >= this.count.files.target))
 		this.uploadEverything(cb);
@@ -351,49 +352,65 @@ SocArrange.prototype.loadFiles = function(cb) {
 		this.load(p, null, this.options, cb);
 };
 
-SocArrange.prototype.load = function(p, dir, options, cb) {
+SocArrange.prototype.loadDir = function(p, options, cb) {
 	this.count.files.target++;
+	fs.readdir(p, (e, list) => {
+		if (e)
+			return void this.handleLoadComplete(e, cb);
+		const newDir = new Directory();
+		this.count.files.target--;
+		if (this.options.reverse)
+			list = list.reverse();
+		for (let n of list) {
+			if (n.match("^._"))
+				continue;
+			const q = path.join(p, n);
+			if (fs.statSync(q).isDirectory()) {
+				this.loadDir(q, options, cb);
+			} else if (n.match("[.](mp4|divx|avi)$")) {
+				this.loadFile(q, newDir, options, cb);
+			} else if (n.match("[.]srt$")) {
+				newDir.subtitleNames.push(n);
+				this.count.subtitles++;
+			}
+		}
+		this.handleLoadComplete(null, cb);
+	});
+};
+
+SocArrange.prototype.loadFile = function(p, dir, options, cb) {
+	this.count.files.target++;
+	let effOpts = options, newOpts;
+	if (effOpts.exceptions) {
+		for (let n of p.split(path.sep)) {
+			if (newOpts = effOpts.exceptions[n]) {
+				Object.setPrototypeOf(newOpts, effOpts);
+				effOpts = newOpts;
+			}
+		}
+	}
+	if (effOpts.skip) 
+		this.count.files.target--;
+	else {
+		this.files.push(new Entry(p, dir, effOpts));
+		this.count.files.loaded++;
+	}
+	this.handleLoadComplete(null, cb);
+};
+
+SocArrange.prototype.load = function(p, dir, options, cb) {
+	verb("Loading %j...", p);
 	fs.stat(p, (e, s) => {
 		if (e)
 			return void this.handleLoadComplete(e, cb);
 		if (s.isDirectory()) {
-			fs.readdir(p, (e, list) => {
-				if (e)
-					return void this.handleLoadComplete(e, cb);
-				const newDir = new Directory();
-				this.count.files.target--;
-				if (this.options.reverse)
-					list = list.reverse();
-				for (let n of list) {
-					if (n.match("^._"))
-						continue;
-					if (n.match("[.](mp4|divx|avi)$")) {
-						this.load(path.join(p, n), newDir, options, cb);
-					} else if (n.match("[.]srt$")) {
-						newDir.subtitleNames.push(n);
-						this.count.subtitles++;
-					}
-				}
-				this.handleLoadComplete(null, cb);
-			});
+			this.loadDir(p, options, cb);
 		} else if (p.match("[.]json")) {
 			this.loadConfig(p, cb);
 		} else {
-			let effOpts = options, newOpts;
-			if (effOpts.exceptions) {
-				for (let n of p.split(path.sep)) {
-					if (newOpts = effOpts.exceptions[n]) {
-						Object.setPrototypeOf(newOpts, effOpts);
-						effOpts = newOpts;
-					}
-				}
-			}
-			this.files.push(new Entry(p, dir, effOpts));
-			this.count.files.loaded++;
-			this.handleLoadComplete(null, cb);
+			this.loadFile(p, dir, options, cb);
 		}
 	});
-
 };
 
 SocArrange.prototype.loadConfig = function(p, cb) {
@@ -417,6 +434,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 	   }
 	  }
 	*/
+	this.count.files.target++;
 	const conf = JSON.parse(fs.readFileSync(p));
 	const options = conf.options || {};
 	Object.setPrototypeOf(options, this.options);
@@ -424,7 +442,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 		if (k === "options")
 			continue;
 		const c = conf[k];
-		const sourcePath = path.join(p, "..", k);
+		const sourcePath = path.resolve(p, "..", k);
 		Object.setPrototypeOf(c, options);
 		// this will increase target count 
 		this.load(sourcePath, null, c, cb);
