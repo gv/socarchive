@@ -463,18 +463,24 @@ SocArrange.prototype.uploadEverything = function(cb) {
 	const caff = spawn("caffeinate", [], {stdio: [0, 1, 2]});
 	const out = e => {
 		caff.kill();
-		cb(e);
+		if (cb) {
+			process.nextTick(cb, e);
+			cb = null;
+		}
 	};
 	console.error(
 		"%j albums, %j files, %j subtitles",
 		this.count.albums, this.count.files.loaded, this.count.subtitles);
+	console.error("count=%j", this.count);
 	this.work = [];
-	this.loadWork(0, (e, r) => {
-		if (e)
-			return void out(e);
-		console.error("%j files to upload", this.work.length);
-		this.continueUpload(0, out);
-	});
+	const continueCheck = i => {
+		if (i >= this.files.length)
+			return void this.continueUpload(0, out);
+		this.check(this.files[i++], e => {
+			e ? out(e) : continueCheck(i)
+		});
+	};
+	continueCheck(0);
 };
 
 SocArrange.prototype.continueUpload = function(i, cb) {
@@ -493,18 +499,6 @@ SocArrange.prototype.findAlbum = function(title, cb) {
 		if (w.length > 1)
 			return void cb(`Too much albums found ${JSON.stringify(w)}`);
 		cb(null, w[0]);
-	});
-};
-
-SocArrange.prototype.uploadIfNotExists = function(entry, cb) {
-	this.findAlbum(entry.getDirName(), (e, r) => {
-		if (e)
-			return void cb(e);
-		if (!r)
-			return void this.upload(entry, cb);
-		this.method("video.get")({album_id: r.id}, (e, r) => {
-			
-		});
 	});
 };
 
@@ -601,31 +595,22 @@ SocArrange.prototype.getAlbum = function(name, cb) {
 		});
 };
 
-SocArrange.prototype.findEntry = function(entry) {
-	
-};
-
-SocArrange.prototype.loadWork = function(i, cb) {
-	if (i >= this.files.length)
-		return void(cb(null));
-	// Video is added to the album only after processing. Until then
-	// it is in "Added" if not private...
-	// TODO check "Added"
-	let album = this.albums[this.files[i].getDirName()];
+SocArrange.prototype.check = function(entry, cb) {
+	let album = this.albums[entry.getDirName()];
 	if (!album) {
-		this.work.push(this.files[i]);
-		return void(this.loadWork(i + 1, cb));
+		this.work.push(entry);
+		return void cb();
 	}
 	this.getItems(album, (e, items) => {
 		if (e)
-			return void(cb(e));
-		const existing = this.files[i].find(items);
+			return void cb(e);
+		const existing = entry.find(items);
 		if (existing.length === 0) {
-			this.work.push(this.files[i]);
-			return void(this.loadWork(i + 1, cb));
+			this.work.push(entry);
+			return void cb();
 		}
-		this.ensureName(existing, this.files[i].getName()).
-			then(r => {this.loadWork(i + 1, cb)}, e => process.nextTick(cb, e));
+		this.ensureName(existing, entry.getName()).
+			then(r => {cb()}, e => process.nextTick(cb, e));
 	});
 };
 
