@@ -334,8 +334,7 @@ SocArrange.prototype.handleLoadComplete = function(e, cb) {
 	if (e)
 		return void cb(this.error = e);
 	// verb("count.files=%j", this.count.files);
-	if (this.albums && (
-		this.count.files.loaded >= this.count.files.target))
+	if (this.albums && (this.files.length >= this.count.files.target))
 		this.uploadEverything(cb);
 };
 
@@ -364,10 +363,10 @@ SocArrange.prototype.loadFiles = function(cb) {
 };
 
 SocArrange.prototype.loadDir = function(p, options, cb) {
-	this.count.files.target++;
 	fs.readdir(p, (e, list) => {
 		if (e)
 			return void this.handleLoadComplete(e, cb);
+		this.count.files.target--;
 		const newDir = new Directory();
 		this.count.files.target--;
 		if (this.options.reverse)
@@ -390,7 +389,6 @@ SocArrange.prototype.loadDir = function(p, options, cb) {
 };
 
 SocArrange.prototype.loadFile = function(p, dir, options, cb) {
-	this.count.files.target++;
 	let effOpts = options, newOpts;
 	if (effOpts.exceptions) {
 		for (let n of p.split(path.sep)) {
@@ -404,13 +402,13 @@ SocArrange.prototype.loadFile = function(p, dir, options, cb) {
 		this.count.files.target--;
 	else {
 		this.files.push(new Entry(p, dir, effOpts));
-		this.count.files.loaded++;
 	}
 	this.handleLoadComplete(null, cb);
 };
 
 SocArrange.prototype.load = function(p, dir, options, cb) {
 	verb("Loading %j...", p);
+	this.count.files.target++;
 	fs.stat(p, (e, s) => {
 		if (e)
 			return void this.handleLoadComplete(e, cb);
@@ -445,7 +443,6 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 	   }
 	  }
 	*/
-	this.count.files.target++;
 	const conf = JSON.parse(fs.readFileSync(p));
 	const options = conf.options || {};
 	Object.setPrototypeOf(options, this.options);
@@ -458,7 +455,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 		// this will increase target count 
 		this.load(sourcePath, null, c, cb);
 	}
-	this.count.files.loaded++;
+	this.count.files.target--;
 	this.handleLoadComplete(null, cb);
 };
 
