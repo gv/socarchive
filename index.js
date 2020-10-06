@@ -124,16 +124,17 @@ ${JSON.stringify(sns)}`));
 	cb(null, sns[0]);
 };
 
-Entry.prototype.getUploadable = function(cb) {
+Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
 	if (this.options.internal) {
-		return void this.getHardsub(this.path, path.basename(this.path), cb);
+		return void this.getHardsubWithProgress(
+			path.basename(this.path), progressHandler, cb);
 	} else if ("none" === this.options.srt) {
 		return void cb(null, this.path);
 	} else if (this.options.srt) {
 		getSubtitleName(this, (e, r) => {
 			if (e)
 				return void cb(e);
-			this.getHardsub(this.path, r, cb);
+			this.getHardsubWithProgress(r, progressHandler, cb);
 		});
 	} else {
 		cb("Uploading without subtitles disabled");
@@ -168,11 +169,13 @@ Entry.prototype.deleteTmpFileSync = function(tmp) {
 	}
 };
 
-Entry.prototype.getHardsubForFullPath = function(src, subName, cb) {
+Entry.prototype.getHardsubForFullPathWithProgress = function(
+	sub, progressHandler, cb) {
 	if (!this.options.copy)
-		return void this.getHardsubCopyDone(src, subName, cb);
+		return void this.getHardsubCopyDoneWithProgress(
+			this.path, sub, progressHandler, cb);
 	const tmp = path.join(this.getTmpDirPath(), this.getName() + ".copy.mp4");
-	fs.stat(src, (e, st) => {
+	fs.stat(this.path, (e, st) => {
 		if (e)
 			return void cb(e);
 		process.on("exit", () => {
@@ -180,21 +183,23 @@ Entry.prototype.getHardsubForFullPath = function(src, subName, cb) {
 		});
 
 		return void spawn(
-			"rsync", ["--progress", src, tmp], {stdio: [0, 1, 2]}).
+			"rsync", ["--progress", this.path, tmp], {stdio: [0, 1, 2]}).
 			on("close", (code, sig) => {
 				if(code || sig)
 					return void cb(new RuntimeError(code || sig));
-				this.getHardsubCopyDone(tmp, subName, cb);
+				this.getHardsubCopyDoneWithProgress(
+					tmp, sub, progressHandler, cb);
 			});
 	});
 };
 
-Entry.prototype.getHardsub = function(src, subName, cb) {
-	return this.getHardsubForFullPath(
-		src, path.join(src, "..", subName), cb);
+Entry.prototype.getHardsubWithProgress = function(subName, progressHandler, cb) {
+	return this.getHardsubForFullPathWithProgress(
+		path.join(this.path, "..", subName), progressHandler, cb);
 };
 
-Entry.prototype.getHardsubCopyDone = function(src, sub, cb) {
+Entry.prototype.getHardsubCopyDoneWithProgress = function(
+	src, sub, progressHandler, cb) {
 	const ffmpeg = process.platform === "win32" ?
 		  path.join(__dirname, "bin", "ffmpeg.exe"):
 		  path.join(process.execPath, "..", "ffmpeg");
@@ -208,7 +213,8 @@ Entry.prototype.getHardsubCopyDone = function(src, sub, cb) {
 		options.stdio[2] = "inherit";
 	let cmd = [
 		ffmpeg, "-i", path.resolve(src),
-		"-vf", `subtitles=${quoteForFilterDef(subName)}`, "-y", tmp];
+		"-vf", `subtitles=${quoteForFilterDef(subName)}`, "-y", "-nostdin",
+		tmp];
 	if (process.platform !== "win32") 
 		cmd = ["caffeinate", "nice"].concat(cmd);
 	const p = spawn(cmd.shift(), cmd, options).on("close", (code, sig) => {
@@ -225,7 +231,7 @@ Entry.prototype.getHardsubCopyDone = function(src, sub, cb) {
 	});
 	if (!this.options.verbose) {
 		getLinesWithLimit(p.stderr, (line, isLast, m) => {
-			verb("ffmpeg: %s", line);
+			progressHandler.verbFromProgram("ffmpeg", line);
 			if (m = line.match("Duration: ([0-9:.]+)")) {
 				this.duration = m[1];
 			} else if (m = line.match("time=\\s*([0-9:.]+)")) {
@@ -250,6 +256,11 @@ function SocArrange(options) {
 	this.options = options;
 	this.count = {moved: 0, deleted: 0, subtitles: 0};
 }
+
+SocArrange.prototype.verbFromProgram = function(prog, message) {
+	verb(
+		"%s [%d/%d]: %s", prog, this.currentIndex, this.work.length, message);
+};
 
 SocArrange.prototype.openBrowser = function(cb) {
 	let url = `https://oauth.vk.com/authorize?client_id=7505964&\
@@ -470,7 +481,7 @@ SocArrange.prototype.uploadEverything = function(cb) {
 };
 
 SocArrange.prototype.continueUpload = function(i, cb) {
-	if (i >= this.work.length)
+	if ((this.currentIndex = i) >= this.work.length)
 		return void(cb(null));
 	this.upload(this.work[i], e => {
 		e ? cb(e) : this.continueUpload(i + 1, cb);
@@ -501,7 +512,7 @@ SocArrange.prototype.uploadIfNotExists = function(entry, cb) {
 };
 
 SocArrange.prototype.upload = function(entry, cb) {
-	entry.getUploadable((e, tmpPath) => {
+	entry.getUploadableWithProgress(this, (e, tmpPath) => {
 		if (e)
 			return void cb(e);
 		this.getAlbum(entry.getDirName(), (e, album) => {
