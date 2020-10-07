@@ -29,6 +29,8 @@ const options = commander.
 	  option(
 		  "--rename-subs",
 		  "Don't upload anything, rename subtitles to match video file names").
+	  option(
+		  "--dry", "Dry run").
 	  parse(process.argv);
 
 util.inherits(Entry, EventEmitter);
@@ -68,6 +70,27 @@ Entry.prototype.getName = function() {
 	return `${this.getName1()} ${this.options.srt.toUpperCase()} SUB`;
 };
 
+Entry.prototype.getName3 = function() {
+	let num = [], subCode;
+	for (let i = this.parts.length - 1; i >= 0; i--) {
+		let part = this.parts[i], m;
+		if (m = part.match("S\\d+E\\d+")) {
+			num = [m[0]];
+			break;
+		}
+		if (m = part.match(new RegExp(
+			"(episode|season|series)\\s*\\d+", "i"))) {
+			num.unshift(m[0]);
+		}
+	}
+	num.push(this.options.title || this.getDirTitle());
+	if ((subCode = this.options.srt.toUpperCase()) !== "NONE") {
+		num.push(subCode);
+		num.push("SUB");
+	}
+	return num.join(" ");
+};
+
 Entry.prototype.isIn = function(items) {
 	return this.find(items).length !== 0;
 };
@@ -92,7 +115,7 @@ Entry.prototype.getSubtitleNames = function() {
 
 const getSubtitleName = function(entry, cb) {
 	let m;
-	m = entry.getName().match("S(\\d\\d)E(\\d\\d)");
+	m = entry.parts[entry.parts.length - 1].match("S(\\d\\d)E(\\d\\d)");
 	if (!m) {
 		return void find(entry, entry.getName1(), (e, r) => {
 			if (e || r)
@@ -241,6 +264,12 @@ Entry.prototype.getHardsubCopyDoneWithProgress = function(
 	}
 };
 
+Entry.prototype.getDescription = function(video, cb) {
+	// TODO delete private data from path
+	// cb(null, this.path)
+	cb(null, this.parts.slice(-2).join("/"));
+};
+
 const spawn = function(prog, args) {
 	console.error("Running %j %j", prog, args);
 	return child_process.spawn.apply(child_process, arguments);
@@ -356,7 +385,7 @@ SocArrange.prototype.loadArchiveState = function(cb) {
 };
 
 SocArrange.prototype.loadFiles = function(cb) {
-	this.count.files = {target: 0, loaded: 0};
+	this.count.files = {target: 0};
 	this.files = [];
 	for(var p of this.options.args)
 		this.load(p, null, this.options, cb);
@@ -366,9 +395,7 @@ SocArrange.prototype.loadDir = function(p, options, cb) {
 	fs.readdir(p, (e, list) => {
 		if (e)
 			return void this.handleLoadComplete(e, cb);
-		this.count.files.target--;
 		const newDir = new Directory();
-		this.count.files.target--;
 		if (this.options.reverse)
 			list = list.reverse();
 		for (let n of list) {
@@ -376,14 +403,17 @@ SocArrange.prototype.loadDir = function(p, options, cb) {
 				continue;
 			const q = path.join(p, n);
 			if (fs.statSync(q).isDirectory()) {
+				this.count.files.target++;
 				this.loadDir(q, options, cb);
 			} else if (n.match("[.](mp4|divx|avi)$")) {
+				this.count.files.target++;
 				this.loadFile(q, newDir, options, cb);
 			} else if (n.match("[.]srt$")) {
 				newDir.subtitleNames.push(n);
 				this.count.subtitles++;
 			}
 		}
+		this.count.files.target--;
 		this.handleLoadComplete(null, cb);
 	});
 };
@@ -470,7 +500,7 @@ SocArrange.prototype.uploadEverything = function(cb) {
 	};
 	console.error(
 		"%j albums, %j files, %j subtitles",
-		this.count.albums, this.count.files.loaded, this.count.subtitles);
+		this.count.albums, this.files.length, this.count.subtitles);
 	console.error("count=%j", this.count);
 	this.work = [];
 	const continueCheck = i => {
@@ -512,18 +542,23 @@ SocArrange.prototype.upload = function(entry, cb) {
 			if (!album.id)
 				return void cb(`No album id ${JSON.stringify(album)}`)
 			console.error(`Uploading to album id=${album.id}`);
-			this.method("video.save")({
-				album_id: album.id,
-				is_private: 0,
-				name: entry.getName()
-			}, (e, r) => {
+			entry.getDescription(null, (e, description) => {
 				if (e)
 					return void cb(e);
-				if (!r.response.upload_url)
-					return void cb(`No upload_url ${JSON.stringify(r)}`);
-				this.doUpload(r.response.upload_url, tmpPath, e => {
-					entry.releaseUploadable(tmpPath);
-					cb(e);
+				this.wmethod("video.save")({
+					album_id: album.id,
+					is_private: 0,
+					name: entry.getName(),
+					description
+				}, (e, r) => {
+					if (e)
+						return void cb(e);
+					if (!r.response.upload_url)
+						return void cb(`No upload_url ${JSON.stringify(r)}`);
+					this.doUpload(r.response.upload_url, tmpPath, e => {
+						entry.releaseUploadable(tmpPath);
+						cb(e);
+					});
 				});
 			});
 		});
@@ -584,7 +619,7 @@ SocArrange.prototype.getAlbum = function(name, cb) {
 	if (this.albums[name])
 		return void(cb(null, this.albums[name]));
 	console.error("Creating album %j", name);
-	this.method("video.addAlbum")({
+	this.wmethod("video.addAlbum")({
 		title: name, privacy: 0}, (e, r) => {
 			if (e)
 				return void(cb(e));
@@ -609,8 +644,7 @@ SocArrange.prototype.check = function(entry, cb) {
 			this.work.push(entry);
 			return void cb();
 		}
-		this.ensureName(existing, entry.getName()).
-			then(r => {cb()}, e => process.nextTick(cb, e));
+		this.setVidsName(existing, entry, cb);
 	});
 };
 
@@ -626,6 +660,32 @@ SocArrange.prototype.ensureName = async function(videos, name) {
 	}
 };
 
+SocArrange.prototype.setVidsName = function(videos, entry, cb) {
+	const name = entry.getName();
+	while (videos.length !== 0) {
+		const v = videos.shift();
+		return void entry.getDescription(v, (e, desc) => {
+			if (e)
+				return void cb(e);
+			if (v.title !== name)
+				console.error("Renaming %j to %j", v.title, name);
+			else if (v.description !== desc)
+				console.error("Updating description on %j", v.title);
+			else
+				return void this.setVidsName(videos, entry, cb);
+			this.wmethod("video.edit")(
+				{name, desc, video_id: v.id}, (e, r) => {
+					if (e)
+						return void cb(e);
+					// verb(".edit=%j", r);
+					this.setVidsName(videos, entry, cb);
+				});
+		});
+	}
+	cb();
+};
+
+
 SocArrange.prototype.getItems = function(album, cb) {
 	if (album.items)
 		return void(cb(null, album.items));
@@ -639,6 +699,9 @@ SocArrange.prototype.getItems = function(album, cb) {
 };
 
 SocArrange.prototype.processInput = function() {
+	if (this.options.dry) {
+		return void cb(`Dry run not supported with current options`);
+	}
 	getLines(process.stdin, (line, isLast, m) => {
 		if (m = line.match("^([0-9-]+)/([0-9]+) ")) {
 			if (this.options.move) {
@@ -714,10 +777,40 @@ SocArrange.prototype.pm = function(name) {
 };
 
 SocArrange.prototype.method = function(name) {
-	return function(query, cb) {
-		this.pm(name)(query).then(
-			r => cb(null, r), e => process.nextTick(cb, e));
+	const method = function(query, cb) {
+		if (this.lastReqTime) {
+			const d = 333 + (this.lastReqTime - new Date);
+			if (d >= 0)
+				return void setTimeout(method, d, query, cb);
+		}
+		this.lastReqTime = new Date;
+		query.access_token = this.options.token;
+		query.v = "5.52";
+		const options = {
+			host: "api.vk.com",
+			path: `/method/${name}?${querystring.stringify(query)}`};
+		https.get(options, res => {
+			exports.readWhole(res, (e, buf) => {
+				if (e)
+					return void cb(e);
+				try {
+					var r = JSON.parse(buf.toString());
+				} catch(e) {
+					return void cb(e);
+				}
+				if (r.error)
+					return void cb(r.error);
+				cb(null, r);
+			});
+		});
 	}.bind(this);
+	return method;
+};
+
+SocArrange.prototype.wmethod = function(name) {
+	return this.options.dry ? function(query, cb) {
+		cb(null, {})
+	} : this.method(name);
 };
 
 exports.readWhole = function(s, cb) {
