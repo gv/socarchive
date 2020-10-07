@@ -107,17 +107,23 @@ Entry.prototype.find = function(items) {
 	return r;
 };
 
-Entry.prototype.getSubtitleNames = function() {
-	return fs.readdirSync(path.dirname(this.path)).
+Entry.prototype.getSubtitleNamesFrom = function(dir) {
+	// If we read them from Directory object we won't be
+	// able to put in new ones as it runs...
+	return fs.readdirSync(dir).
 		filter(x => !x.match("^._")).
 		filter(x => x.match("[.]srt$"));
 };
 
-const getSubtitleName = function(entry, cb) {
+Entry.prototype.getSubtitleNames = function() {
+	return this.getSubtitleNamesFrom(path.dirname(this.path));
+};
+
+const getSubtitleName1 = function(entry, names, cb) {
 	let m;
 	m = entry.parts[entry.parts.length - 1].match("S(\\d\\d)E(\\d\\d)");
 	if (!m) {
-		return void find(entry, entry.getName1(), (e, r) => {
+		return void find1(entry, names, entry.getName1(), (e, r) => {
 			if (e || r)
 				return void cb(e, r);
 			return void(cb(`Can't find sub for ${entry.getName()}`));
@@ -125,20 +131,24 @@ const getSubtitleName = function(entry, cb) {
 	}
 
 	let s = parseInt(m[1], 10);
-	find(entry, `${s}x${m[2]}`, (e, r) => {
+	find1(entry, names, `${s}x${m[2]}`, (e, r) => {
 		if (r)
 			return void cb(null, r);
 		//find (entry, `${}`, (e, r) => {
 		//	if (r)
 		//		return void cb(null, r);
-		find(entry, `^0*${parseInt(m[2], 10)}[^\\d]`, cb);
+		find1(entry, names, `^0*${parseInt(m[2], 10)}[^\\d]`, cb);
 		//});
 	});
 };
 
-const find = function(entry, pat, cb) {
-	console.error("Matching %j in %j", pat, entry.getSubtitleNames());
-	const sns = entry.getSubtitleNames().filter(x => x.match(pat));
+const getSubtitleName = function(entry, cb) {
+	getSubtitleName1(entry, entry.getSubtitleNames(), cb);
+};
+
+const find1 = function(entry, names, pat, cb) {
+	console.error("Matching %j in %j", pat, names);
+	const sns = names.filter(x => x.match(pat));
 	if (sns.length === 0)
 		return void(cb(`No subtitles for ${entry.path}`));
 	if (sns.length > 1)
@@ -147,7 +157,7 @@ ${JSON.stringify(sns)}`));
 	cb(null, sns[0]);
 };
 
-Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
+Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 	if (this.options.internal) {
 		return void this.getHardsubWithProgress(
 			path.basename(this.path), progressHandler, cb);
@@ -163,6 +173,28 @@ Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
 		cb("Uploading without subtitles disabled");
 		//cb(null, this.path);
 	}
+};
+
+Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
+	// If there is 2nd sub check if it's readable before we convert
+	if (!this.options.topSrt)
+		return void this.getUploadable1(progressHandler, cb);
+	const sp = path.join(
+		this.options.configPath, "..", this.options.topSrt.dir);
+	getSubtitleName1(this, this.getSubtitleNamesFrom(sp), (e, sn2) => {
+		if (e)
+			return void cb(e);
+		this.getUploadable1(progressHandler, (e, hard1) => {
+			if (e || !this.options.topSrt)
+				return void cb(e, p);
+			this.getHardsubCopyDoneWithProgress(
+				hard1, path.join(sp, sn2) + ":force_style='Alignment=6'",
+				progressHandler, (e, h2) => {
+					this.releaseUploadable(hard1);
+					cb(e, h2);
+				});
+		});
+	});
 };
 
 const quoteForFilterDef = str =>
@@ -482,6 +514,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 		const c = conf[k];
 		const sourcePath = path.resolve(p, "..", k);
 		Object.setPrototypeOf(c, options);
+		c.configPath = p;
 		// this will increase target count 
 		this.load(sourcePath, null, c, cb);
 	}
