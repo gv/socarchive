@@ -197,9 +197,6 @@ Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
 	});
 };
 
-const quoteForFilterDef = str =>
-	  str.replace(new RegExp("'", "g"), "\\'");
-
 Entry.prototype.getTmpDirPath = function() {
 	return (process.platform == "win32") ? process.cwd() : "/tmp";
 };
@@ -253,22 +250,29 @@ Entry.prototype.getHardsubWithProgress = function(subName, progressHandler, cb) 
 		path.join(this.path, "..", subName), progressHandler, cb);
 };
 
+const quoteForFilterDef = str =>
+	  str.replace(new RegExp("['\\\\]", "g"), "\\$&");
+
+const quoteForFilterGraph = str =>
+	  quoteForFilterDef(quoteForFilterDef(str));
+
 Entry.prototype.getHardsubCopyDoneWithProgress = function(
 	src, sub, progressHandler, cb) {
 	const ffmpeg = process.platform === "win32" ?
 		  path.join(__dirname, "bin", "ffmpeg.exe"):
 		  path.join(process.execPath, "..", "ffmpeg");
 	const tmp = path.join(this.getTmpDirPath(), this.getName() + ".tmp.mp4");
-	// Quoting is broken. Need to change working directory
-	// until I figure out how to fix it
-	const options = {
-		stdio: ["inherit", "inherit", "pipe"], cwd: path.dirname(sub)};
-	const subName = path.basename(sub);
+	const options = {stdio: ["inherit", "inherit", "pipe"]};
+	if (this.options.cd) {
+		// If quoting breaks again use this
+		options.cwd = path.dirname(sub);
+		sub = path.basename(sub);
+	}
 	if (this.options.verbose)
 		options.stdio[2] = "inherit";
 	let cmd = [
 		ffmpeg, "-i", path.resolve(src),
-		"-vf", `subtitles=${quoteForFilterDef(subName)}`, "-y", "-nostdin",
+		"-vf", `subtitles=${quoteForFilterGraph(sub)}`, "-y", "-nostdin",
 		tmp];
 	if (process.platform !== "win32") 
 		cmd = ["caffeinate", "nice"].concat(cmd);
