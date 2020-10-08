@@ -20,24 +20,26 @@ const options = commander.
 		  "Read items from stdin and remove them").
 	  option("-o, --open", "Get OAuth page").
 	  option("--srt <substring>", "Get a subtitle with this substring").
-	  option("--internal", "Use internal subtitles").
+	  option("--internal", "Use embedded subtitles").
 	  option("--upload <path>", "Test upload").
-	  option("--reverse", "Reverse directory lists").
+	  option("--reverse", "Read directories in reverse order").
 	  option("--list", "List videos").
 	  option("--verbose, -v", "Verbose").
 	  option("--copy", "Copy source videos to temp dir before encoding").
 	  option(
 		  "--rename-subs",
 		  "Don't upload anything, rename subtitles to match video file names").
-	  option(
-		  "--dry", "Dry run").
+	  option("--dry", "Dry run").
+	  option("--nocaffeinate", "Do not suppress sleeping").
 	  parse(process.argv);
 
 util.inherits(Entry, EventEmitter);
 
 function Entry(ep, dir, options) {
+	/*
 	if (!new.target)
 		return new Entry(ep, dir, options);
+	*/
 	this.parts = ep.split(new RegExp(`\\${path.sep}+`, "g"));
 	this.path = ep;
 	this.options = options;
@@ -112,18 +114,19 @@ Entry.prototype.getSubtitleNamesFrom = function(dir) {
 	// able to put in new ones as it runs...
 	return fs.readdirSync(dir).
 		filter(x => !x.match("^._")).
-		filter(x => x.match("[.]srt$"));
+		filter(x => x.match(new RegExp("[.]srt$", "i")));
 };
 
 Entry.prototype.getSubtitleNames = function() {
 	return this.getSubtitleNamesFrom(path.dirname(this.path));
 };
 
-const getSubtitleName1 = function(entry, names, cb) {
-	let m;
-	m = entry.parts[entry.parts.length - 1].match("S(\\d\\d)E(\\d\\d)");
+const getSubtitleName1 = function(entry, names, dir, cb) {
+	let name = entry.parts[entry.parts.length - 1],
+		m = name.match("S(\\d\\d)E(\\d\\d)") ||
+		name.match("(\\d+)[.](\\d+)");
 	if (!m) {
-		return void find1(entry, names, entry.getName1(), (e, r) => {
+		return void find1(entry, names, dir, entry.getName1(), (e, r) => {
 			if (e || r)
 				return void cb(e, r);
 			return void(cb(`Can't find sub for ${entry.getName()}`));
@@ -131,26 +134,32 @@ const getSubtitleName1 = function(entry, names, cb) {
 	}
 
 	let s = parseInt(m[1], 10);
-	find1(entry, names, `${s}x${m[2]}`, (e, r) => {
+	find1(entry, names, dir, `${s}(x|E)${m[2]}`, (e, r) => {
 		if (r)
 			return void cb(null, r);
 		//find (entry, `${}`, (e, r) => {
 		//	if (r)
 		//		return void cb(null, r);
-		find1(entry, names, `^0*${parseInt(m[2], 10)}[^\\d]`, cb);
+		find1(entry, names, dir, `^0*${parseInt(m[2], 10)}[^\\d]`, cb);
 		//});
 	});
 };
 
 const getSubtitleName = function(entry, cb) {
-	getSubtitleName1(entry, entry.getSubtitleNames(), cb);
+	getSubtitleName1(
+		entry, entry.getSubtitleNames(), path.dirname(entry.path), cb);
 };
 
-const find1 = function(entry, names, pat, cb) {
+const getSubtitleNameFrom = function(entry, dir, cb) {
+	getSubtitleName1(entry, entry.getSubtitleNamesFrom(dir), dir, cb);
+}
+
+const find1 = function(entry, names, dir, pat, cb) {
 	console.error("Matching %j in %j", pat, names);
 	const sns = names.filter(x => x.match(pat));
 	if (sns.length === 0)
-		return void(cb(`No subtitles for ${entry.path}`));
+		return void cb(
+			new Error(`No subtitles for ${entry.path} in "${dir}"}`));
 	if (sns.length > 1)
 		return void(cb(`Too much subtitles for ${entry.path}: \
 ${JSON.stringify(sns)}`));
@@ -159,15 +168,22 @@ ${JSON.stringify(sns)}`));
 
 Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 	if (this.options.internal) {
+		if (this.options.srtDir)
+			return void cb(new Error(
+				"'internal' and 'srtDir' options incompatible"));
 		return void this.getHardsubWithProgress(
 			path.basename(this.path), progressHandler, cb);
 	} else if ("none" === this.options.srt) {
 		return void cb(null, this.path);
 	} else if (this.options.srt) {
-		getSubtitleName(this, (e, r) => {
+		const srtDir = this.options.srtDir &&
+			  path.join(this.options.configPath, "..", this.options.srtDir) ||
+			  path.dirname(this.path);
+		getSubtitleNameFrom(this, srtDir, (e, r) => {
 			if (e)
 				return void cb(e);
-			this.getHardsubWithProgress(r, progressHandler, cb);
+			this.getHardsubForFullPathWithProgress(
+				path.join(srtDir, r), progressHandler, cb);
 		});
 	} else {
 		cb("Uploading without subtitles disabled");
@@ -175,18 +191,17 @@ Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 	}
 };
 
-Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
-	// If there is 2nd sub check if it's readable before we convert
+Entry.prototype.getUploadableDoubleEnc = function(progressHandler, cb) {
 	if (!this.options.topSrt)
 		return void this.getUploadable1(progressHandler, cb);
 	const sp = path.join(
 		this.options.configPath, "..", this.options.topSrt.dir);
-	getSubtitleName1(this, this.getSubtitleNamesFrom(sp), (e, sn2) => {
+	getSubtitleName1(this, this.getSubtitleNamesFrom(sp), sp, (e, sn2) => {
 		if (e)
 			return void cb(e);
 		this.getUploadable1(progressHandler, (e, hard1) => {
 			if (e || !this.options.topSrt)
-				return void cb(e, p);
+				return void cb(e, hard1);
 			this.getHardsubCopyDoneWithProgress(
 				hard1, path.join(sp, sn2) + ":force_style='Alignment=6'",
 				progressHandler, (e, h2) => {
@@ -197,6 +212,20 @@ Entry.prototype.getUploadableWithProgress = function(progressHandler, cb) {
 	});
 };
 
+Entry.prototype.getUploadable = function(progressHandler, cb) {
+	// If there is 2nd sub check if it's readable before we convert
+	if (!this.options.topSrt)
+		return void this.getUploadable1(progressHandler, cb);
+	const sp = path.join(
+		this.options.configPath, "..", this.options.topSrt.dir);
+	getSubtitleName1(this, this.getSubtitleNamesFrom(sp), sp, (e, sn2) => {
+		if (e)
+			return void cb(e);
+		this.topSrt = path.join(sp, sn2);
+		this.getUploadable1(progressHandler, cb);
+	});
+};
+			
 Entry.prototype.getTmpDirPath = function() {
 	return (process.platform == "win32") ? process.cwd() : "/tmp";
 };
@@ -250,19 +279,42 @@ Entry.prototype.getHardsubWithProgress = function(subName, progressHandler, cb) 
 		path.join(this.path, "..", subName), progressHandler, cb);
 };
 
+// See ffmpeg/doc/filters.texi @section Notes on filtergraph escaping
+
 const quoteForFilterDef = str =>
 	  str.replace(new RegExp("['\\\\]", "g"), "\\$&");
 
 const quoteForFilterGraph = str =>
-	  quoteForFilterDef(quoteForFilterDef(str));
+	  quoteForFilterDef(str).replace(new RegExp("['\\\\,]", "g"), "\\$&");
+
+Entry.prototype.getFfmpegCommandSync = function(src, sub, tmp) {
+	const ffmpeg = process.platform === "win32" ?
+		  [path.join(__dirname, "bin", "ffmpeg.exe")] :
+		  process.platform === "darwin" ?
+		  [path.join(process.execPath, "..", "ffmpeg")] :
+		  ["ffmpeg", "-strict", "-2"];
+	let fg = `subtitles=${quoteForFilterGraph(sub)}`;
+	if (this.topSrt) {
+		fg += `\
+,subtitles=${quoteForFilterGraph(this.topSrt)}:\
+force_style='Alignment=6':charenc=cp1251`;
+	}
+	return ffmpeg.concat([
+		"-i", path.resolve(src), "-vf", fg, "-y", "-nostdin", tmp]);
+};
+
+Entry.prototype.getMencoderCommandSync = function(src, sub, out) {
+	let cmd = ["mencoder", src, "-oac", "copy", "-ovc", "copy", "-o", out];
+	if (path.basename(sub) != path.basename(src)) {
+		cmd = cmd.concat(["-sub", sub]);
+	}
+	return cmd
+};
 
 Entry.prototype.getHardsubCopyDoneWithProgress = function(
 	src, sub, progressHandler, cb) {
-	const ffmpeg = process.platform === "win32" ?
-		  path.join(__dirname, "bin", "ffmpeg.exe"):
-		  path.join(process.execPath, "..", "ffmpeg");
 	const tmp = path.join(this.getTmpDirPath(), this.getName() + ".tmp.mp4");
-	const options = {stdio: ["inherit", "inherit", "pipe"]};
+	let options = {stdio: ["inherit", "inherit", "pipe"]}, cmd, prog;
 	if (this.options.cd) {
 		// If quoting breaks again use this
 		options.cwd = path.dirname(sub);
@@ -270,27 +322,26 @@ Entry.prototype.getHardsubCopyDoneWithProgress = function(
 	}
 	if (this.options.verbose)
 		options.stdio[2] = "inherit";
-	let cmd = [
-		ffmpeg, "-i", path.resolve(src),
-		"-vf", `subtitles=${quoteForFilterGraph(sub)}`, "-y", "-nostdin",
-		tmp];
+	if (process.platform === "___linux")
+		cmd = this.getMencoderCommandSync(src, sub, tmp);
+	else
+		cmd = this.getFfmpegCommandSync(src, sub, tmp);
+	prog = cmd[0];
 	if (process.platform !== "win32") 
-		cmd = ["caffeinate", "nice"].concat(cmd);
-	const p = spawn(cmd.shift(), cmd, options).on("close", (code, sig) => {
-			  if (this.options.copy)
-				  this.deleteTmpFileSync(src);
-			  if (code)
-				  return void(cb(`Code ${code}`));
-			  if (sig)
-				  return void(cb(`Signal ${sig}`));
-			  cb(null, tmp);
-		});
+		cmd = ["nice"].concat(cmd);
+	if (process.platform === "darwin")
+		cmd = ["caffeinate"].concat(cmd);
+	const p = spawn(cmd.shift(), cmd, options, e => {
+		if (this.options.copy)
+			this.deleteTmpFileSync(src);
+		cb(e, tmp);
+	});
 	process.on("exit", () => {
 		this.deleteTmpFileSync(tmp);
 	});
 	if (!this.options.verbose) {
 		getLinesWithLimit(p.stderr, (line, isLast, m) => {
-			progressHandler.verbFromProgram("ffmpeg", line);
+			progressHandler.verbFromProgram(prog, line);
 			if (m = line.match("Duration: ([0-9:.]+)")) {
 				this.duration = m[1];
 			} else if (m = line.match("time=\\s*([0-9:.]+)")) {
@@ -306,9 +357,16 @@ Entry.prototype.getDescription = function(video, cb) {
 	cb(null, this.parts.slice(-2).join("/"));
 };
 
-const spawn = function(prog, args) {
+const spawn = function(prog, args, options, cb) {
 	console.error("Running %j %j", prog, args);
-	return child_process.spawn.apply(child_process, arguments);
+	const e = new Error();
+	return child_process.spawn(prog, args, options).
+		on("close", (code, sig) => {
+			if (code || sig) {
+				e.message = `Return ${code || sig}`;
+			}
+			cb && cb((code || sig) && e);
+		});
 };
 
 function Directory() {
@@ -316,7 +374,7 @@ function Directory() {
 }
 
 function SocArrange(options) {
-	if (!new.target)
+	if (!(this instanceof SocArrange))
 		return new SocArrange(options);
 	this.options = options;
 	this.count = {moved: 0, deleted: 0, subtitles: 0};
@@ -441,7 +499,7 @@ SocArrange.prototype.loadDir = function(p, options, cb) {
 			if (fs.statSync(q).isDirectory()) {
 				this.count.files.target++;
 				this.loadDir(q, options, cb);
-			} else if (n.match("[.](mp4|divx|avi)$")) {
+			} else if (n.match("[.](mp4|divx|avi|mkv)$")) {
 				this.count.files.target++;
 				this.loadFile(q, newDir, options, cb);
 			} else if (n.match("[.]srt$")) {
@@ -527,9 +585,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 };
 
 SocArrange.prototype.uploadEverything = function(cb) {
-	const caff = spawn("caffeinate", [], {stdio: [0, 1, 2]});
 	const out = e => {
-		caff.kill();
 		if (cb) {
 			process.nextTick(cb, e);
 			cb = null;
@@ -570,7 +626,8 @@ SocArrange.prototype.findAlbum = function(title, cb) {
 };
 
 SocArrange.prototype.upload = function(entry, cb) {
-	entry.getUploadableWithProgress(this, (e, tmpPath) => {
+	console.error("options=%j", entry.options);
+	entry.getUploadable(this, (e, tmpPath) => {
 		if (e)
 			return void cb(e);
 		this.getAlbum(entry.getDirName(), (e, album) => {
@@ -683,18 +740,6 @@ SocArrange.prototype.check = function(entry, cb) {
 		}
 		this.setVidsName(existing, entry, cb);
 	});
-};
-
-SocArrange.prototype.ensureName = async function(videos, name) {
-	if (!name)
-		throw new TypeError("Has to be a name");
-	for (let v of videos) {
-		if (v.title === name)
-			continue;
-		const options = {name, video_id: v.id}
-		console.error("Renaming from=%j to=%j", v.title, options);
-		await this.pm("video.edit")(options);
-	}
 };
 
 SocArrange.prototype.setVidsName = function(videos, entry, cb) {
@@ -885,9 +930,13 @@ function getLinesWithLimit(stream, cb) {
 	stream.on("close", () => {acc & cb(acc, true)});
 };
 
-
-SocArrange(options).run(e => {
-	if (e) {
-		throw (e.error_msg || e)
-	}
-});
+if (process.platform === "darwin" && (!options.nocaffeinate)) {
+	const cmd = process.argv.concat(["--nocaffeinate"]);
+	spawn("caffeinate", cmd, {stdio: [0, 1, 2]});
+} else {
+	SocArrange(options).run(e => {
+		if (e) {
+			throw (e.error_msg || e)
+		}
+	});
+}
