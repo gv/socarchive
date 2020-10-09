@@ -35,6 +35,32 @@ const options = commander.
 
 util.inherits(Entry, EventEmitter);
 
+function Description(text) {
+	if (!new.target)
+		return new Description(text);
+	if (text) {
+		parts = text.split("\n\n");
+		this.title = parts.shift();
+		for (let p of parts) {
+			const q = p.split(":\n\t");
+			throw new Error("TODO");
+		}
+	}
+}
+
+Description.prototype.getTextSync = function() {
+	return [this.title].concat(
+		["Subtitles", "Top subtitles"].
+			filter(n => this[n]).
+			map(n => `${this[n].name}:\n\t${this[n].text}`)).
+		join("\n\n");
+};
+
+Description.prototype.setPart = function(name, text) {
+	this[name] = text;
+	return this;
+};
+
 function Entry(ep, dir, options) {
 	/*
 	if (!new.target)
@@ -49,8 +75,6 @@ function Entry(ep, dir, options) {
 const verb = function() {
 	console.error.apply(console, arguments);
 };
-
-verb("path.sep=%j", path.sep);
 
 Entry.prototype.getDirName = function() {
 	const p = [];
@@ -171,8 +195,8 @@ Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 		if (this.options.srtDir)
 			return void cb(new Error(
 				"'internal' and 'srtDir' options incompatible"));
-		return void this.getHardsubWithProgress(
-			path.basename(this.path), progressHandler, cb);
+		return void this.getHardsubForFullPathWithProgress(
+			this.path, progressHandler, cb);
 	} else if ("none" === this.options.srt) {
 		return void cb(null, this.path);
 	} else if (this.options.srt) {
@@ -186,8 +210,7 @@ Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 				path.join(srtDir, r), progressHandler, cb);
 		});
 	} else {
-		cb("Uploading without subtitles disabled");
-		//cb(null, this.path);
+		cb(new Error("Uploading without subtitles disabled"));
 	}
 };
 
@@ -212,7 +235,7 @@ Entry.prototype.getUploadableDoubleEnc = function(progressHandler, cb) {
 	});
 };
 
-Entry.prototype.getUploadable = function(progressHandler, cb) {
+Entry.prototype.getUploadable_old = function(progressHandler, cb) {
 	// If there is 2nd sub check if it's readable before we convert
 	if (!this.options.topSrt)
 		return void this.getUploadable1(progressHandler, cb);
@@ -223,6 +246,19 @@ Entry.prototype.getUploadable = function(progressHandler, cb) {
 			return void cb(e);
 		this.topSrt = path.join(sp, sn2);
 		this.getUploadable1(progressHandler, cb);
+	});
+};
+
+Entry.prototype.getUploadable = function(progressHandler, cb) {
+	if ("none" === this.options.srt)
+		return void cb(null, this.path);
+	this.getTopSubtitle(e => {
+		if (e)
+			return void cb(e);
+		this.getSubtitle(e => {
+			this.getHardsubForFullPathWithProgress(
+				this.sub, progressHandler, cb);
+		});
 	});
 };
 			
@@ -272,11 +308,6 @@ Entry.prototype.getHardsubForFullPathWithProgress = function(
 					tmp, sub, progressHandler, cb);
 			});
 	});
-};
-
-Entry.prototype.getHardsubWithProgress = function(subName, progressHandler, cb) {
-	return this.getHardsubForFullPathWithProgress(
-		path.join(this.path, "..", subName), progressHandler, cb);
 };
 
 // See ffmpeg/doc/filters.texi @section Notes on filtergraph escaping
@@ -354,7 +385,54 @@ Entry.prototype.getHardsubCopyDoneWithProgress = function(
 Entry.prototype.getDescription = function(video, cb) {
 	// TODO delete private data from path
 	// cb(null, this.path)
-	cb(null, this.parts.slice(-2).join("/"));
+	return void cb(null, this.parts.slice(-2).join("/"));
+	// TODO Enable
+	this.getSubtitle(e => {
+		if (e)
+			return void cb(e);
+		this.getTopSubtitle(e => {
+			if (e)
+				return void cb(e);
+			const cutPath = parts => parts.slice(-2).join("/"); 
+			const d = Description(cutPath(this.parts)).
+				  setPart("Subtitles", cutPath(this.sub.split(path.sep)));
+			if (this.topSrt)
+				d.setPart(
+					"Top subtitles", cutPath(this.topSrt.split(path.sep)));
+			cb(null, d.getTextSync());
+		});
+	});
+};
+
+Entry.prototype.getSubtitle = function(cb) {
+	if (this.sub || "none" === this.options.srt)
+		return void cb(null, this.sub);
+	if (this.options.internal) {
+		if (this.options.srtDir)
+			return void cb(new Error(
+				"'internal' and 'srtDir' options incompatible"));
+		this.sub = this.path;
+		return void cb(null, this.sub);
+	}
+	const p = this.options.srtDir &&
+		  path.join(this.options.configDir, this.options.srtDir) ||
+		  path.dirname(this.path);
+	getSubtitleNameFrom(this, p, (e, n) => {
+		if (e)
+			return void cb(e);
+		cb(null, this.sub = path.join(p, n));
+	});
+};
+
+Entry.prototype.getTopSubtitle = function(cb) {
+	if (this.topSrt || (!this.options.topSrt))
+		return void cb(null, this.topSrt);
+	const d = path.join(this.options.configDir, this.options.topSrt.dir);
+	getSubtitleNameFrom(this, d, (e, filename) => {
+		if (e)
+			return void cb(e);
+		cb(null, this.topSrt = path.join(d, filename));
+	});
 };
 
 const spawn = function(prog, args, options, cb) {
@@ -577,6 +655,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 		const sourcePath = path.resolve(p, "..", k);
 		Object.setPrototypeOf(c, options);
 		c.configPath = p;
+		c.configDir = path.dirname(p);
 		// this will increase target count 
 		this.load(sourcePath, null, c, cb);
 	}
