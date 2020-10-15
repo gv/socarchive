@@ -26,9 +26,11 @@ const options = commander.
 	  option("--list", "List videos").
 	  option("--verbose, -v", "Verbose").
 	  option("--copy", "Copy source videos to temp dir before encoding").
+	  /*
 	  option(
 		  "--rename-subs",
 		  "Don't upload anything, rename subtitles to match video file names").
+	  */
 	  option("--dry", "Dry run").
 	  option("--nocaffeinate", "Do not suppress sleeping").
 	  option("--save <output_dir>", "Save hardsubs there").
@@ -864,7 +866,12 @@ SocArrange.prototype.setVidsName = function(videos, entry, cb) {
 				return void cb(e);
 			if (v.title !== name)
 				console.error("Renaming %j to %j", v.title, name);
-			else if (v.description !== desc)
+			// TODO
+			// Description will change if subtitle options are
+			// changed, but it would become inconsistent with the
+			// video then
+			// TODO
+			else if (this.descUpdateEnabled && (v.description !== desc))
 				console.error("Updating description on %j", v.title);
 			else
 				return void this.setVidsName(videos, entry, cb);
