@@ -288,7 +288,7 @@ Entry.prototype.adjustSub = function(cb) {
 	if (!this.options.delay || (this.options.delay == 0))
 		return void cb(null, this.sub);
 	const tmpPath = path.join(this.getTmpDirPath(), this.getName() + ".srt");
-	const cmd = this.getFfmpegSync().concat(
+	let cmd = this.getFfmpegSync().concat(
 		"-y", "-nostdin", "-itsoffset", this.options.delay,
 		"-i", this.sub, "-c", "copy", tmpPath);
 	spawn(cmd.shift(), cmd, {stdio: [0, 1, 2]}, e => {
@@ -351,10 +351,10 @@ Entry.prototype.getHardsubForFullPathWithProgress = function(
 // See ffmpeg/doc/filters.texi @section Notes on filtergraph escaping
 
 const quoteForFilterDef = str =>
-	  str.replace(new RegExp("['\\\\]", "g"), "\\$&");
+	  str.replace(new RegExp("['\\\\:]", "g"), "\\$&");
 
 const quoteForFilterGraph = str =>
-	  quoteForFilterDef(str).replace(new RegExp("['\\\\,]", "g"), "\\$&");
+	  quoteForFilterDef(str).replace(new RegExp("['\\\\,;\\[\\]]", "g"), "\\$&");
 
 Entry.prototype.getFfmpegSync = function() {
 	return process.platform === "win32" ?
@@ -367,12 +367,23 @@ Entry.prototype.getFfmpegSync = function() {
 Entry.prototype.getFfmpegCommandSync = function(src, sub, tmp) {
 	let fg = `subtitles=${quoteForFilterGraph(sub)}`;
 	if (this.topSrt) {
-		fg += `\
-,subtitles=${quoteForFilterGraph(this.topSrt)}:\
-force_style='Alignment=6':charenc=cp1251`;
+		if (this.topSrt.sid) {
+			fg += `,subtitles=${quoteForFilterGraph(src)}:\
+sid=${this.topSrt.sid}:`;
+		} else {
+			fg += `,subtitles=${quoteForFilterGraph(this.topSrt)}:`;
+		}
+		fg += `force_style='Alignment=6':charenc=cp1251`;
 	}
-	return this.getFfmpegSync().concat([
-		"-i", path.resolve(src), "-vf", fg, "-y", "-nostdin", tmp]);
+	let cmd = this.getFfmpegSync();
+	if (this.options.ffmpeg && this.options.ffmpeg.input)
+		cmd = cmd.concat(this.options.ffmpeg.input.split(" "));
+	cmd = cmd.concat([
+		"-i", path.resolve(src), "-vf", fg, "-y", "-nostdin"]);
+	if (this.options.ffmpeg && this.options.ffmpeg.output)
+		cmd = cmd.concat(this.options.ffmpeg.output.split(" "));
+	cmd.push(tmp);
+	return cmd;
 };
 
 Entry.prototype.getMencoderCommandSync = function(src, sub, out) {
@@ -443,7 +454,9 @@ Entry.prototype.getDescription = function(video, cb) {
 				d.setPart("Subtitles", cutPath(this.sub.split(path.sep)));
 			if (this.topSrt)
 				d.setPart(
-					"Top subtitles", cutPath(this.topSrt.split(path.sep)));
+					"Top subtitles",
+					this.topSrt.sid ? `embedded id=${this.topSrt.sid}` :
+						cutPath(this.topSrt.split(path.sep)));
 			cb(null, d.getTextSync());
 		});
 	});
@@ -472,6 +485,11 @@ Entry.prototype.getSubtitle = function(cb) {
 Entry.prototype.getTopSubtitle = function(cb) {
 	if (this.topSrt || (!this.options.topSrt))
 		return void cb(null, this.topSrt);
+	if (this.options.topSrt.sid)
+		return void cb(null, this.topSrt = this.options.topSrt);
+	if (!this.options.topSrt.dir)
+		return void cb(new Error(
+			`topSrt option needs to have 'dir' or 'sid' subkey`));
 	const d = path.join(this.options.configDir, this.options.topSrt.dir);
 	getSubtitleNameFrom(this, d, (e, filename) => {
 		if (e)
