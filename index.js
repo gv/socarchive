@@ -20,12 +20,13 @@ const options = commander.
 		  "Read items from stdin and remove them").
 	  option("-o, --open", "Get OAuth page").
 	  option("--srt <substring>", "Get a subtitle with this substring").
-	  option("--internal", "Use embedded subtitles").
+	  option("--embedded", "Use embedded subtitles").
 	  option("--upload <path>", "Test upload").
 	  option("--reverse", "Read directories in reverse order").
 	  option("--list", "List videos").
 	  option("--verbose, -v", "Verbose").
 	  option("--copy", "Copy source videos to temp dir before encoding").
+	  option("--updatedescriptions", "Update descriptions").
 	  /*
 	  option(
 		  "--rename-subs",
@@ -53,7 +54,7 @@ function Description(text) {
 
 Description.prototype.getTextSync = function() {
 	return [this.title].concat(
-		["Subtitles", "Top subtitles"].
+		["Notes", "Subtitles", "Top subtitles"].
 			filter(n => this[n]).
 			map(n => `${n}:\n   ${this[n]}`)).
 		join("\n\n");
@@ -88,7 +89,7 @@ Entry.prototype.getDirName = function() {
 		if (words.length)
 			break;
 	}
-	return `${p.join(", ")} ${this.options.srt.toUpperCase()} SUB`;
+	return `${p.join(", ")} ${this.dir.options.srt.toUpperCase()} SUB`;
 };
 
 Entry.prototype.getName1 = function() {
@@ -99,12 +100,23 @@ Entry.prototype.getName2_0 = function() {
 	return `${this.getName1()} ${this.options.srt.toUpperCase()} SUB`;
 };
 
-Entry.prototype.getName = function() {
+Entry.prototype.getName2_1 = function() {
 	if ("none" === this.options.srt)
 		return this.getName1();
 	else
 		return this.getName2_0();
 };
+
+Entry.prototype.getName2_2 = function() {
+	if (!this.options.title)
+		return this.getName2_1();
+	return this.options.title.replace(
+		new RegExp("\\$(\\d)"), x => {
+			throw x;
+		});
+};
+
+Entry.prototype.getName = Entry.prototype.getName2_1;
 
 Entry.prototype.getName3 = function() {
 	let num = [], subCode;
@@ -208,10 +220,10 @@ ${JSON.stringify(sns)}`));
 };
 
 Entry.prototype.getUploadable1 = function(progressHandler, cb) {
-	if (this.options.internal) {
+	if (this.options.embedded) {
 		if (this.options.srtDir)
 			return void cb(new Error(
-				"'internal' and 'srtDir' options incompatible"));
+				"'embedded' and 'srtDir' options incompatible"));
 		return void this.getHardsubForFullPathWithProgress(
 			this.path, progressHandler, cb);
 	} else if ("none" === this.options.srt) {
@@ -425,6 +437,8 @@ Entry.prototype.getDescription = function(video, cb) {
 				return void cb(e);
 			const cutPath = parts => parts.slice(-2).join("/");
 			const d = Description(cutPath(this.parts));
+			if (this.options.notes)
+				d.setPart("Notes", this.options.notes);
 			if (this.sub) 
 				d.setPart("Subtitles", cutPath(this.sub.split(path.sep)));
 			if (this.topSrt)
@@ -438,10 +452,10 @@ Entry.prototype.getDescription = function(video, cb) {
 Entry.prototype.getSubtitle = function(cb) {
 	if (this.sub || "none" === this.options.srt)
 		return void cb(null, this.sub);
-	if (this.options.internal) {
+	if (this.options.embedded) {
 		if (this.options.srtDir)
 			return void cb(new Error(
-				"'internal' and 'srtDir' options incompatible"));
+				"'embedded' and 'srtDir' options incompatible"));
 		this.sub = this.path;
 		return void cb(null, this.sub);
 	}
@@ -478,7 +492,8 @@ const spawn = function(prog, args, options, cb) {
 		});
 };
 
-function Directory() {
+function Directory(options) {
+	this.options = options;
 	this.subtitleNames = [];
 }
 
@@ -554,7 +569,7 @@ SocArrange.prototype.runIfAccessOk = function(cb) {
 		if (0 && !this.options.srt)
 			return void cb(new TypeError("\
 Uploading without subtitles disabled; to \
-engage internal subs, use --internal --srt LANG")); 
+engage embedded subs, use --embedded --srt LANG")); 
 		this.loadArchiveState(cb);
 		this.loadFiles(cb);
 	}
@@ -591,14 +606,18 @@ SocArrange.prototype.loadFiles = function(cb) {
 	this.count.files = {target: 0};
 	this.files = [];
 	for(var p of this.options.args)
-		this.load(p, null, this.options, cb);
+		this.load(p, new Directory(this.options), this.options, cb);
+};
+
+SocArrange.prototype.getEffOptsSync = function(p, options) {
+	throw new TypeError("TODO");
 };
 
 SocArrange.prototype.loadDir = function(p, options, cb) {
 	fs.readdir(p, (e, list) => {
 		if (e)
 			return void this.handleLoadComplete(e, cb);
-		const newDir = new Directory();
+		const newDir = new Directory(options);
 		if (this.options.reverse)
 			list = list.reverse();
 		for (let n of list) {
@@ -668,7 +687,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 	   "dir1": {
 	    "srt": "FR",
 	    "exceptions": {
-	     "subdir1": {"internal": true},
+	     "subdir1": {"embedded": true},
 	     "basename1": {"srt": "none"}
 	    }
 	   },
@@ -693,7 +712,7 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 		c.configPath = p;
 		c.configDir = path.dirname(p);
 		// this will increase target count 
-		this.load(sourcePath, null, c, cb);
+		this.load(sourcePath, new Directory(c), c, cb);
 	}
 	this.count.files.target--;
 	this.handleLoadComplete(null, cb);
@@ -740,8 +759,8 @@ SocArrange.prototype.findAlbum = function(title, cb) {
 	});
 };
 
-SocArrange.prototype.upload = function(entry, cb) {
-	console.error("options=%j", entry.options);
+SocArrange.prototype.upload1 = function(entry, cb) {
+	// console.error("options=%j", entry.options);
 	entry.getUploadable(this, (e, tmpPath) => {
 		if (e)
 			return void cb(e);
@@ -750,7 +769,8 @@ SocArrange.prototype.upload = function(entry, cb) {
 				return void cb(e);
 			if (!album.id)
 				return void cb(`No album id ${JSON.stringify(album)}`)
-			console.error(`Uploading to album id=${album.id}`);
+			console.error(`\
+Uploading "${entry.getName()}" to album "${entry.getDirName()}" (${album.id})`);
 			entry.getDescription(null, (e, description) => {
 				if (e)
 					return void cb(e);
@@ -771,6 +791,14 @@ SocArrange.prototype.upload = function(entry, cb) {
 				});
 			});
 		});
+	});
+};
+
+SocArrange.prototype.upload = function(entry, cb) {
+	this.checkSafeRename(entry.getName(), {}, e => {
+		if (e)
+			return void cb(e);
+		this.upload1(entry, cb);
 	});
 };
 
@@ -871,7 +899,8 @@ SocArrange.prototype.setVidsName = function(videos, entry, cb) {
 			// changed, but it would become inconsistent with the
 			// video then
 			// TODO
-			else if (this.descUpdateEnabled && (v.description !== desc))
+			else if (this.options.updatedescriptions &&
+					 (v.description !== desc))
 				console.error("Updating description on %j", v.title);
 			else
 				return void this.setVidsName(videos, entry, cb);
