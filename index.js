@@ -116,9 +116,20 @@ Entry.prototype.getName2_2 = function() {
 		});
 };
 
-Entry.prototype.getName = Entry.prototype.getName2_1;
-
 Entry.prototype.getName3 = function() {
+	if (!this.options.title)
+		return this.getName2_1();
+	return this.options.title.replace("%N", s => {
+		return this.parts.slice(-1)[0].match("[0-9.]+") ||
+			(() => {throw new Error(
+				`No number in "${this.parts.slice(-1)[0]}"`)})();
+	}) + (("none" === this.options.srt) ? "" :
+			` ${this.options.srt.toUpperCase()} SUB`);
+};
+
+Entry.prototype.getName = Entry.prototype.getName3;
+
+Entry.prototype.getNameUnused = function() {
 	let num = [], subCode;
 	for (let i = this.parts.length - 1; i >= 0; i--) {
 		let part = this.parts[i], m;
@@ -147,9 +158,9 @@ Entry.prototype.find = function(items) {
 	// console.error("items=%j", items);
 	const r = [];
 	for (let x of items) {
-		if (this.getName1() === x.title)
-			r.push(x);
-		else if (this.getName2_0() === x.title)
+		if (this.getName1() === x.title ||
+			this.getName2_0() === x.title ||
+			this.getName3() === x.title)
 			r.push(x)
 	}
 	return r;
@@ -168,6 +179,9 @@ Entry.prototype.getSubtitleNames = function() {
 };
 
 const findSameName = function(entry, names, dir, cb) {
+	// Shouldn't use fs.exists here bc ".srt" letters might be in
+	// different cases
+	// console.error("check %j", entry.getName1(), entry.getSubtitleNames());
 	return void find1(entry, names, dir, entry.getName1(), cb);
 };
 
@@ -203,10 +217,6 @@ const getSubtitleName = function(entry, cb) {
 		entry, entry.getSubtitleNames(), path.dirname(entry.path), cb);
 };
 
-const getSubtitleNameFrom = function(entry, dir, cb) {
-	getSubtitleName1(entry, entry.getSubtitleNamesFrom(dir), dir, cb);
-}
-
 const find1 = function(entry, names, dir, pat, cb) {
 	// console.error("Matching %j in %j", pat, names);
 	const sns = names.filter(x => x.match(pat));
@@ -218,6 +228,8 @@ const find1 = function(entry, names, dir, pat, cb) {
 ${JSON.stringify(sns)}`));
 	cb(null, sns[0]);
 };
+
+
 
 Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 	if (this.options.embedded) {
@@ -232,7 +244,7 @@ Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 		const srtDir = this.options.srtDir &&
 			  path.join(this.options.configPath, "..", this.options.srtDir) ||
 			  path.dirname(this.path);
-		getSubtitleNameFrom(this, srtDir, (e, r) => {
+		this.getSubtitleNameFrom(srtDir, (e, r) => {
 			if (e)
 				return void cb(e);
 			this.getHardsubForFullPathWithProgress(
@@ -369,11 +381,12 @@ Entry.prototype.getFfmpegCommandSync = function(src, sub, tmp) {
 	if (this.topSrt) {
 		if (this.topSrt.sid) {
 			fg += `,subtitles=${quoteForFilterGraph(src)}:\
-sid=${this.topSrt.sid}:`;
+stream_index=${this.topSrt.sid}:`;
 		} else {
 			fg += `,subtitles=${quoteForFilterGraph(this.topSrt)}:`;
 		}
-		fg += `force_style='Alignment=6':charenc=cp1251`;
+		const enc = this.options.topSrtEncoding || "cp1251";
+		fg += `force_style='Alignment=6':charenc=${enc}`;
 	}
 	let cmd = this.getFfmpegSync();
 	if (this.options.ffmpeg && this.options.ffmpeg.input)
@@ -475,7 +488,7 @@ Entry.prototype.getSubtitle = function(cb) {
 	const p = this.options.srtDir &&
 		  path.join(this.options.configDir, this.options.srtDir) ||
 		  path.dirname(this.path);
-	getSubtitleNameFrom(this, p, (e, n) => {
+	this.getSubtitleNameFrom(p, (e, n) => {
 		if (e)
 			return void cb(e);
 		cb(null, this.sub = path.join(p, n));
@@ -491,10 +504,33 @@ Entry.prototype.getTopSubtitle = function(cb) {
 		return void cb(new Error(
 			`topSrt option needs to have 'dir' or 'sid' subkey`));
 	const d = path.join(this.options.configDir, this.options.topSrt.dir);
-	getSubtitleNameFrom(this, d, (e, filename) => {
+	this.getSubtitleNameFrom(d, (e, filename) => {
 		if (e)
 			return void cb(e);
 		cb(null, this.topSrt = path.join(d, filename));
+	});
+};
+
+Entry.prototype.getSubtitleNameFrom = function(dir, cb) {
+	this.listSubtitlesIn(dir, (e, names) => {
+		if (e)
+			return void cb(e);
+		let same = names.filter(name => (name.toLowerCase() === (
+			this.getName1().toLowerCase() + ".srt")));
+		if (same.length === 1)
+			return void cb(null, same[0]);
+		if (same.length !== 0)
+			throw new Error("TODO");
+		getSubtitleName1(this, names, dir, cb);
+	});
+};
+
+Entry.prototype.listSubtitlesIn = function(dir, cb) {
+	fs.readdir(dir, (e, names) => {
+		if (e)
+			return void cb(e);
+		cb(null, names.filter(x => !x.match("^._")).
+		   filter(x => x.match(new RegExp("[.]srt$", "i"))));
 	});
 };
 
@@ -886,8 +922,10 @@ SocArrange.prototype.getAlbum = function(name, cb) {
 };
 
 SocArrange.prototype.check = function(entry, cb) {
+	console.error("Looking for %j in %j", entry.getName(), entry.getDirName());
 	let album = this.albums[entry.getDirName()];
 	if (!album) {
+		console.error("No album");
 		this.work.push(entry);
 		return void cb();
 	}
@@ -896,6 +934,7 @@ SocArrange.prototype.check = function(entry, cb) {
 			return void cb(e);
 		const existing = entry.find(items);
 		if (existing.length === 0) {
+			console.error("Not found");
 			this.work.push(entry);
 			return void cb();
 		}
@@ -941,10 +980,14 @@ SocArrange.prototype.setVidsName = function(videos, entry, cb) {
 SocArrange.prototype.checkSafeRename = function(name, v, cb) {
 	if (name === v.title)
 		return void cb(null);
+	const e = new Error, getError = message => {
+		e.message = message;
+		return e;
+	};
 	this.getVideos(e => {
 		cb(e ||
 		   ((this.videos.filter(v => name === v.title).length) &&
-			new Error(`Name "${name}" already exists`)));
+			getError(`Name "${name}" already exists`)));
 	});
 };
 
@@ -1050,6 +1093,7 @@ SocArrange.prototype.pm = function(name) {
 
 SocArrange.prototype.method = function(name) {
 	const method = function(query, cb) {
+		const e = new Error();
 		if (this.lastReqTime) {
 			const d = 333 + (this.lastReqTime - new Date);
 			if (d >= 0)
