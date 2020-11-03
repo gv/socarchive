@@ -119,12 +119,17 @@ Entry.prototype.getName2_2 = function() {
 Entry.prototype.getName3 = function() {
 	if (!this.options.title)
 		return this.getName2_1();
-	return this.options.title.replace("%N", s => {
-		return this.parts.slice(-1)[0].match("[0-9.]+") ||
-			(() => {throw new Error(
-				`No number in "${this.parts.slice(-1)[0]}"`)})();
-	}) + (("none" === this.options.srt) ? "" :
-			` ${this.options.srt.toUpperCase()} SUB`);
+	return this.options.title.replace("%N", s => this.number(-1)).
+		replace("%M", s => this.number(-2)) +
+		(("none" === this.options.srt) ? "" :
+		 ` ${this.options.srt.toUpperCase()} SUB`);
+};
+
+Entry.prototype.number = function(index) {
+	let p = this.parts.slice(index)[0], m;
+	if (m = p.match("[0-9.]+"))
+		return m;
+	throw new Error(`No number in "${p}"`);
 };
 
 Entry.prototype.getName = Entry.prototype.getName3;
@@ -377,7 +382,8 @@ Entry.prototype.getFfmpegSync = function() {
 }
 
 Entry.prototype.getFfmpegCommandSync = function(src, sub, tmp) {
-	let fg = `subtitles=${quoteForFilterGraph(sub)}`;
+	let enc = this.options.srtEncoding || "cp1251";
+	let fg = `subtitles=${quoteForFilterGraph(sub)}:charenc=${enc}`;
 	if (this.topSrt) {
 		if (this.topSrt.sid) {
 			fg += `,subtitles=${quoteForFilterGraph(src)}:\
