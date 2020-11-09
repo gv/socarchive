@@ -506,6 +506,9 @@ Entry.prototype.getTopSubtitle = function(cb) {
 		return void cb(null, this.topSrt);
 	if (this.options.topSrt.sid)
 		return void cb(null, this.topSrt = this.options.topSrt);
+	if (this.options.topSrt.file)
+		return void cb(null, this.topSrt = path.join(
+			path.dirname(this.path), this.options.topSrt.file));
 	if (!this.options.topSrt.dir)
 		return void cb(new Error(
 			`topSrt option needs to have 'dir' or 'sid' subkey`));
@@ -676,6 +679,17 @@ SocArrange.prototype.getEffOptsSync = function(p, options) {
 };
 
 SocArrange.prototype.loadDir = function(p, options, cb) {
+	const confPath = path.join(p, "sbackup.json");
+	fs.stat(confPath, (e, st) => {
+		if (!e)
+			return void this.loadConfig(confPath, cb);
+		if ("ENOENT" === e.code)
+			return void this.loadDirNoDirConfFile(p, options, cb);
+		cb(e);
+	});
+};
+
+SocArrange.prototype.loadDirNoDirConfFile = function(p, options, cb) {
 	fs.readdir(p, (e, list) => {
 		if (e)
 			return void this.handleLoadComplete(e, cb);
@@ -930,7 +944,8 @@ SocArrange.prototype.getAlbum = function(name, cb) {
 };
 
 SocArrange.prototype.check = function(entry, cb) {
-	console.error("Looking for %j in %j", entry.getName(), entry.getDirName());
+	process.stderr.write(util.format(
+		"Looking for %j in %j...", entry.getName(), entry.getDirName()));
 	let album = this.albums[entry.getDirName()];
 	if (!album) {
 		console.error("No album");
@@ -946,6 +961,7 @@ SocArrange.prototype.check = function(entry, cb) {
 			this.work.push(entry);
 			return void cb();
 		}
+		console.error("%j items", existing.length);
 		this.setVidsName(existing, entry, cb);
 	});
 };
