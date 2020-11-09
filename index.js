@@ -1,16 +1,6 @@
 "use strict"
-const commander = require("./lib/commander.js");
-const https = require("https");
-const querystring = require("querystring");
-const url = require("url");
-const child_process = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const EventEmitter = require("events").EventEmitter;
-const util = require("util");
-
-const options = commander.
+const options = require("./lib/commander.js").
+	  description("A script to make hardsubs & upload them to vk.com").
 	  option("-t, --token <token>", "Access token").
 	  option(
 		  "-m, --move <id>",
@@ -33,9 +23,19 @@ const options = commander.
 		  "Don't upload anything, rename subtitles to match video file names").
 	  */
 	  option("--dry", "Dry run").
-	  option("--nocaffeinate", "Do not suppress sleeping").
+	  option("--nocaffeinate", "Do not suppress sleeping on Mac").
 	  option("--save <output_dir>", "Save hardsubs there").
 	  parse(process.argv);
+
+const https = require("https");
+const querystring = require("querystring");
+const url = require("url");
+const child_process = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const EventEmitter = require("events").EventEmitter;
+const util = require("util");
 
 util.inherits(Entry, EventEmitter);
 
@@ -521,6 +521,8 @@ Entry.prototype.getSubtitleNameFrom = function(dir, cb) {
 	this.listSubtitlesIn(dir, (e, names) => {
 		if (e)
 			return void cb(e);
+		if (1 === names.length)
+			return void cb(null, names[0]);
 		let same = names.filter(name => (name.toLowerCase() === (
 			this.getName1().toLowerCase() + ".srt")));
 		if (same.length === 1)
