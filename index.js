@@ -81,6 +81,14 @@ const verb = function() {
 };
 
 Entry.prototype.getDirName = function() {
+	if (this.options.albumTitle) {
+		return this.options.albumTitle.replace("%Y", s => {
+			const name = this.parts.splce(-1)[0], m = name.match("\\d{4}");
+			if (!m)
+				throw new Error(`No year in "${name}"`);
+			return m[0];
+		});
+	}
 	const p = [];
 	for (let i = this.parts.length - 2; i >= 0; i--) {
 		p.unshift(this.parts[i]);
@@ -532,6 +540,14 @@ Entry.prototype.getSubtitleNameFrom = function(dir, cb) {
 			return void cb(null, same[0]);
 		if (same.length !== 0)
 			throw new Error("TODO");
+		const cd = this.parts.slice(-1)[0].match("CD\\d+");
+		if (cd) {
+			let samecd = names.filter(n => n.match(cd[0]));
+			if (1 === samecd.length)
+				return void cb(null, samecd[0]);
+			if (0 !== samecd.length)
+				throw new Error("TODO");
+		}
 		getSubtitleName1(this, names, dir, cb);
 	});
 };
@@ -943,7 +959,7 @@ SocArrange.prototype.getAlbum = function(name, cb) {
 		});
 };
 
-SocArrange.prototype.check = function(entry, cb) {
+SocArrange.prototype.checkWithAlbum = function(entry, cb) {
 	process.stderr.write(util.format(
 		"Looking for %j in %j...", entry.getName(), entry.getDirName()));
 	let album = this.albums[entry.getDirName()];
@@ -957,6 +973,23 @@ SocArrange.prototype.check = function(entry, cb) {
 			return void cb(e);
 		const existing = entry.find(items);
 		if (existing.length === 0) {
+			console.error("Not found");
+			this.work.push(entry);
+			return void cb();
+		}
+		console.error("%j items", existing.length);
+		this.setVidsName(existing, entry, cb);
+	});
+};
+
+SocArrange.prototype.check = function(entry, cb) {
+	process.stderr.write(util.format(
+		"Looking for %j...", entry.getName()));
+	this.getVideos(e => {
+		if (e)
+			return void cb(e);
+		const existing = entry.find(this.videos);
+		if (0 === existing.length) {
 			console.error("Not found");
 			this.work.push(entry);
 			return void cb();
