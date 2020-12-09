@@ -83,7 +83,7 @@ const verb = function() {
 Entry.prototype.getDirName = function() {
 	if (this.options.albumTitle) {
 		return this.options.albumTitle.replace("%Y", s => {
-			const name = this.parts.splce(-1)[0], m = name.match("\\d{4}");
+			const name = this.parts.slice(-1)[0], m = name.match("\\d{4}");
 			if (!m)
 				throw new Error(`No year in "${name}"`);
 			return m[0];
@@ -502,7 +502,7 @@ Entry.prototype.getSubtitle = function(cb) {
 	const p = this.options.srtDir &&
 		  path.join(this.options.configDir, this.options.srtDir) ||
 		  path.dirname(this.path);
-	this.getSubtitleNameFrom(p, (e, n) => {
+	this.getSubtitleNameFromDirOrItself(p, (e, n) => {
 		if (e)
 			return void cb(e);
 		cb(null, this.sub = path.join(p, n));
@@ -528,12 +528,14 @@ Entry.prototype.getTopSubtitle = function(cb) {
 	});
 };
 
-Entry.prototype.getSubtitleNameFrom = function(dir, cb) {
+Entry.prototype.getSubtitleNameFromEx = function(dir, options, cb) {
 	this.listSubtitlesIn(dir, (e, names) => {
 		if (e)
 			return void cb(e);
 		if (1 === names.length)
 			return void cb(null, names[0]);
+		if (0 === names.length && options.maybeItself)
+			return void cb(null, this.parts.slice(-1)[0]);
 		let same = names.filter(name => (name.toLowerCase() === (
 			this.getName1().toLowerCase() + ".srt")));
 		if (same.length === 1)
@@ -550,6 +552,14 @@ Entry.prototype.getSubtitleNameFrom = function(dir, cb) {
 		}
 		getSubtitleName1(this, names, dir, cb);
 	});
+};
+
+Entry.prototype.getSubtitleNameFrom = function(dir, cb) {
+	this.getSubtitleNameFromEx(dir, {'maybeItself': false}, cb);
+};
+
+Entry.prototype.getSubtitleNameFromDirOrItself = function(dir, cb) {
+	this.getSubtitleNameFromEx(dir, {'maybeItself': true}, cb);
 };
 
 Entry.prototype.listSubtitlesIn = function(dir, cb) {
