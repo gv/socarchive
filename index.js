@@ -100,17 +100,30 @@ Entry.prototype.getDirName = function() {
 	return `${p.join(", ")} ${this.dir.options.srt.toUpperCase()} SUB`;
 };
 
+Entry.prototype.isTitle = function(n) {
+	let words = n.split(/[^A-Za-z]+/g);
+	words = words.filter(x => !x.match(/episode|season|series|^$/i));
+	return !!words.length;
+};
+
 Entry.prototype.getName1 = function() {
-	return this.parts[this.parts.length - 1].replace(/[.][^.]+$/, "");
+	return this.parts.slice(-1)[0].replace(/[.][^.]+$/, "");
+};
+
+Entry.prototype.getNameA = function() {
+	let m = -1, n = this.parts.slice(m)[0].replace(/[.][^.]+$/, "");
+	while (!this.isTitle(n) && (-m < this.parts.length))
+		n = this.parts.slice(--m)[0] + " " + n;
+	return n;
 };
 
 Entry.prototype.getName2_0 = function() {
-	return `${this.getName1()} ${this.options.srt.toUpperCase()} SUB`;
+	return `${this.getNameA()} ${this.options.srt.toUpperCase()} SUB`;
 };
 
 Entry.prototype.getName2_1 = function() {
 	if ("none" === this.options.srt)
-		return this.getName1();
+		return this.getNameA();
 	else
 		return this.getName2_0();
 };
@@ -423,44 +436,68 @@ Entry.prototype.getMencoderCommandSync = function(src, sub, out) {
 
 Entry.prototype.getHardsubCopyDoneWithProgress = function(
 	src, sub, progressHandler, cb) {
-	const tmp = this.options.save ?
-		  path.join(this.options.save, this.getName() + ".mp4") :
+	const tmp = this.options.save ? (
+		this.options.configDir ?
+			path.join(
+				this.options.configDir, this.options.save,
+				this.getName() + ".mp4") :
+			path.join(this.options.save, this.getName() + ".mp4")):
 		  path.join(this.getTmpDirPath(), this.getName() + ".tmp.mp4");
-	let options = {stdio: ["inherit", "inherit", "pipe"]}, cmd, prog;
-	if (this.options.cd) {
-		// If quoting breaks again use this
-		options.cwd = path.dirname(sub);
-		sub = path.basename(sub);
-	}
-	if (this.options.verbose)
-		options.stdio[2] = "inherit";
-	if (process.platform === "___linux")
-		cmd = this.getMencoderCommandSync(src, sub, tmp);
-	else
-		cmd = this.getFfmpegCommandSync(src, sub, tmp);
-	prog = cmd[0];
-	if (process.platform !== "win32") 
-		cmd = ["nice"].concat(cmd);
-	if (process.platform === "darwin")
-		cmd = ["caffeinate"].concat(cmd);
-	const p = spawn(cmd.shift(), cmd, options, e => {
-		if (this.options.copy)
-			this.deleteTmpFileSync(src);
-		cb(e, tmp);
-	});
-	this.options.save || process.on("exit", () => {
-		this.deleteTmpFileSync(tmp);
-	});
-	if (!this.options.verbose) {
-		getLinesWithLimit(p.stderr, (line, isLast, m) => {
-			progressHandler.verbFromProgram(prog, line);
-			if (m = line.match("Duration: ([0-9:.]+)")) {
-				this.duration = m[1];
-			} else if (m = line.match("time=\\s*([0-9:.]+)")) {
-				this.position = m[1];
-			}
+	this.makeDirectoryIfNotExists(path.dirname(tmp), e => {
+		if (e)
+			return void cb(e);
+		let options = {stdio: ["inherit", "inherit", "pipe"]}, cmd, prog;
+		if (this.options.cd) {
+			// If quoting breaks again use this
+			options.cwd = path.dirname(sub);
+			sub = path.basename(sub);
+		}
+		if (this.options.verbose)
+			options.stdio[2] = "inherit";
+		if (process.platform === "___linux")
+			cmd = this.getMencoderCommandSync(src, sub, tmp);
+		else
+			cmd = this.getFfmpegCommandSync(src, sub, tmp);
+		prog = cmd[0];
+		if (process.platform !== "win32") 
+			cmd = ["nice"].concat(cmd);
+		if (process.platform === "darwin")
+			cmd = ["caffeinate"].concat(cmd);
+		const p = spawn(cmd.shift(), cmd, options, e => {
+			if (this.options.copy)
+				this.deleteTmpFileSync(src);
+			cb(e, tmp);
 		});
-	}
+		this.options.save || process.on("exit", () => {
+			this.deleteTmpFileSync(tmp);
+		});
+		if (!this.options.verbose) {
+			getLinesWithLimit(p.stderr, (line, isLast, m) => {
+				progressHandler.verbFromProgram(prog, line);
+				if (m = line.match("Duration: ([0-9:.]+)")) {
+					this.duration = m[1];
+				} else if (m = line.match("time=\\s*([0-9:.]+)")) {
+					this.position = m[1];
+				}
+			});
+		}
+	});
+};
+
+Entry.prototype.makeDirectoryIfNotExists = function(p, cb) {
+	fs.stat(p, (e, st) => {
+		if (e) {
+			if (e.code !== "ENOENT")
+				return void cb(e);
+			return void this.makeDirectoryIfNotExists(path.dirname(p), e => {
+				if (e)
+					return void cb(e);
+				fs.mkdir(p, cb);
+			});
+		}
+		cb(st.isDirectory() ? null : new Error(
+			`${JSON.stringify(p)} is not a directory`));
+	});
 };
 
 Entry.prototype.getDescription = function(video, cb) {
@@ -529,26 +566,31 @@ Entry.prototype.getTopSubtitle = function(cb) {
 };
 
 Entry.prototype.getSubtitleNameFromEx = function(dir, options, cb) {
+	const is1 = array => {
+		if (array.length === 1) {
+			cb(null, array[0]);
+			return true;
+		}
+		if (array.length !== 0)
+			throw new Error("TODO");
+	};
 	this.listSubtitlesIn(dir, (e, names) => {
 		if (e)
 			return void cb(e);
 		if (1 === names.length)
 			return void cb(null, names[0]);
-		if (0 === names.length && options.maybeItself)
-			return void cb(null, this.parts.slice(-1)[0]);
-		let same = names.filter(name => (name.toLowerCase() === (
-			this.getName1().toLowerCase() + ".srt")));
-		if (same.length === 1)
-			return void cb(null, same[0]);
-		if (same.length !== 0)
-			throw new Error("TODO");
+		if (0 === names.length && options.maybeItself) {
+			const n = this.parts.slice(-1)[0];
+			if (n.match(new RegExp("[.]mkv$", "i")))
+				return void cb(null, this.parts.slice(-1)[0]);
+		}
+		if (is1(names.filter(name => (name.toLowerCase() === (
+			this.getName1().toLowerCase() + ".srt")))))
+			return;
 		const cd = this.parts.slice(-1)[0].match("CD\\d+");
 		if (cd) {
-			let samecd = names.filter(n => n.match(cd[0]));
-			if (1 === samecd.length)
-				return void cb(null, samecd[0]);
-			if (0 !== samecd.length)
-				throw new Error("TODO");
+			if (is1(names.filter(n => n.match(cd[0]))))
+				return;
 		}
 		getSubtitleName1(this, names, dir, cb);
 	});
@@ -744,11 +786,13 @@ SocArrange.prototype.loadDirNoDirConfFile = function(p, options, cb) {
 
 SocArrange.prototype.loadFile = function(p, dir, options, cb) {
 	let effOpts = options, newOpts;
+	// console.error("file=%s options=%s", p, JSON.stringify(effOpts, null, 2));
 	if (effOpts.exceptions) {
 		for (let n of p.split(path.sep)) {
-			if (newOpts = effOpts.exceptions[n]) {
-				Object.setPrototypeOf(newOpts, effOpts);
-				effOpts = newOpts;
+			if (newOpts = options.exceptions[n]) {
+				// Object.setPrototypeOf(newOpts, effOpts);
+				// effOpts = newOpts;
+				effOpts = Object.assign({}, effOpts, newOpts);
 			}
 		}
 	}
@@ -803,18 +847,42 @@ SocArrange.prototype.loadConfig = function(p, cb) {
 	  }
 	*/
 	const conf = JSON.parse(fs.readFileSync(p));
-	const options = conf.options || {};
-	Object.setPrototypeOf(options, this.options);
-	for (let k in conf) {
-		if (k === "options")
-			continue;
-		const c = conf[k];
-		const sourcePath = path.resolve(p, "..", k);
-		Object.setPrototypeOf(c, options);
-		c.configPath = p;
-		c.configDir = path.dirname(p);
-		// this will increase target count 
-		this.load(sourcePath, new Directory(c), c, cb);
+	const options = Object.assign(
+		{}, this.options, conf.options || {})
+	// Object.setPrototypeOf(options, this.options);
+	
+	if (options.loadRoot) {
+		const exceptions = {}, add = (k, v) => {
+			if (k in exceptions)
+				throw new Error(`Can't add ${k} twice`)
+			exceptions[k] = v;
+		};
+		for (let k in conf) {
+			if (k !== "options")
+				add(k, conf[k]);
+			if (conf[k].exceptions) {
+				for (let c in conf[k].exceptions)
+					add(c, conf[k].exceptions[c]);
+			}
+		}
+		options.exceptions = exceptions;
+		options.configPath = p;
+		options.configDir = path.dirname(p);
+		this.load(path.dirname(p), new Directory(options), options, cb);
+	} else {
+		for (let k in conf) {
+			if (k === "options")
+				continue;
+			const sourcePath = path.resolve(p, "..", k);
+			//const c = conf[k];
+			//Object.setPrototypeOf(c, options);
+			// conf[k].xxx is more important then options.xxx
+			const c = Object.assign({}, options, conf[k]);
+			c.configPath = p;
+			c.configDir = path.dirname(p);
+			// this will increase target count 
+			this.load(sourcePath, new Directory(c), c, cb);
+		}
 	}
 	this.count.files.target--;
 	this.handleLoadComplete(null, cb);
@@ -936,7 +1004,7 @@ SocArrange.prototype.doUpload = function(target, tmpPath, cb) {
 		}).pipe(req, {end: false});
 	});
 	req.on("response", res => {
-		let msg = `Upload status=${res.statusCode}`;
+		let msg = `Upload status=${res.statusCode} ${res.statusMessage}`;
 		console.error(msg);
 		if (res.statusCode >= 400)
 			return void(cb(msg));
@@ -993,6 +1061,7 @@ SocArrange.prototype.checkWithAlbum = function(entry, cb) {
 };
 
 SocArrange.prototype.check = function(entry, cb) {
+	// console.error("options=%s", JSON.stringify(entry.options, null, 1))
 	process.stderr.write(util.format(
 		"Looking for %j...", entry.getName()));
 	this.getVideos(e => {
@@ -1231,13 +1300,16 @@ function getLinesWithLimit(stream, cb) {
 	stream.on("close", () => {acc & cb(acc, true)});
 };
 
-if (process.platform === "darwin" && (!options.nocaffeinate)) {
-	const cmd = process.argv.concat(["--nocaffeinate"]);
-	spawn("caffeinate", cmd, {stdio: [0, 1, 2]});
-} else {
-	SocArrange(options).run(e => {
-		if (e) {
-			throw (e.error_msg || e)
-		}
-	});
+if (require.main === module) {
+	if (process.platform === "darwin" && (!options.nocaffeinate)) {
+		const cmd = process.argv.concat(["--nocaffeinate"]);
+		spawn("caffeinate", cmd, {stdio: [0, 1, 2]});
+	} else {
+		SocArrange(options).run(e => {
+			if (e) {
+				throw (e.error_msg || e)
+			}
+		});
+	}
 }
+exports.SocArrange = SocArrange;
