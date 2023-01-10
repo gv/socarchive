@@ -140,10 +140,10 @@ Entry.prototype.getName2_2 = function() {
 Entry.prototype.getName3 = function() {
 	if (!this.options.title)
 		return this.getName2_1();
-	return this.options.title.replace("%N", s => this.number(-1)).
+	return this.subst(this.options.title.replace("%N", s => this.number(-1)).
 		replace("%M", s => this.number(-2)) +
 		(("none" === this.options.srt) ? "" :
-		 ` ${this.options.srt.toUpperCase()} SUB`);
+		 ` ${this.options.srt.toUpperCase()} SUB`));
 };
 
 Entry.prototype.number = function(index) {
@@ -427,11 +427,14 @@ stream_index=${this.topSrt.sid}:`;
 };
 
 Entry.prototype.getMencoderCommandSync = function(src, sub, out) {
-	let cmd = ["mencoder", src, "-oac", "copy", "-ovc", "copy", "-o", out];
+	let cmd = [
+		(process.platform === "win32" ?
+		 path.resolve(__filename, "..", "lib", "mencoder.exe") : "mencoder"),
+		src, "-oac", "copy", "-ovc", "copy", "-o", out];
 	if (path.basename(sub) != path.basename(src)) {
 		cmd = cmd.concat(["-sub", sub]);
 	}
-	return cmd
+	return cmd.concat(this.options.mencoder || [])
 };
 
 Entry.prototype.getHardsubCopyDoneWithProgress = function(
@@ -454,7 +457,7 @@ Entry.prototype.getHardsubCopyDoneWithProgress = function(
 		}
 		if (this.options.verbose)
 			options.stdio[2] = "inherit";
-		if (process.platform === "___linux")
+		if (process.platform === "win32")
 			cmd = this.getMencoderCommandSync(src, sub, tmp);
 		else
 			cmd = this.getFfmpegCommandSync(src, sub, tmp);
@@ -565,6 +568,18 @@ Entry.prototype.getTopSubtitle = function(cb) {
 	});
 };
 
+Entry.prototype.subst = function(tmpl) {
+	return tmpl.replace(new RegExp("%e", "g"), s => {
+		let m = this.parts.slice(-1)[0].match("[Ee](\\d+)");
+		if (m === null)
+			throw new TypeError(`No ${s}`);
+		return m[1];
+	}).replace(new RegExp("%\\d", "g"), s => {
+		const n = +(s.substring(1));
+		return this.parts[this.parts.length - n];
+	});
+};
+
 Entry.prototype.getSubtitleNameFromEx = function(dir, options, cb) {
 	const is1 = array => {
 		if (array.length === 1) {
@@ -584,6 +599,15 @@ Entry.prototype.getSubtitleNameFromEx = function(dir, options, cb) {
 			if (n.match(new RegExp("[.]mkv$", "i")))
 				return void cb(null, this.parts.slice(-1)[0]);
 		}
+
+		if (this.options.srtMatch) {
+			if (!is1(names.filter(
+				n => n.match(this.subst(this.options.srtMatch))))) {
+				throw new Error("TODO")
+			}
+			return;
+		}
+		
 		if (is1(names.filter(name => (name.toLowerCase() === (
 			this.getName1().toLowerCase() + ".srt")))))
 			return;
