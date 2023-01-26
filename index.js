@@ -10,6 +10,7 @@ const options = require("./lib/commander.js").
 		  "Read items from stdin and remove them").
 	  option("-o, --open", "Get OAuth page").
 	  option("--srt <substring>", "Get a subtitle with this substring").
+	  option("--topSrt <substring>", "Top subtitle").
 	  option("--embedded", "Use embedded subtitles").
 	  option("--upload <path>", "Test upload").
 	  option("--reverse", "Read directories in reverse order").
@@ -97,7 +98,8 @@ Entry.prototype.getDirName = function() {
 		if (words.length)
 			break;
 	}
-	return `${p.join(", ")} ${this.dir.options.srt.toUpperCase()} SUB`;
+	const srt = this.dir.options.srt || this.dir.options.topSrt;
+	return `${p.join(", ")} ${srt.toUpperCase()} SUB`;
 };
 
 Entry.prototype.isTitle = function(n) {
@@ -118,7 +120,8 @@ Entry.prototype.getNameA = function() {
 };
 
 Entry.prototype.getName2_0 = function() {
-	return `${this.getNameA()} ${this.options.srt.toUpperCase()} SUB`;
+	let srt = this.options.srt || this.options.topSrt;
+	return `${this.getNameA()} ${srt.toUpperCase()} SUB`;
 };
 
 Entry.prototype.getName2_1 = function() {
@@ -282,6 +285,7 @@ Entry.prototype.getUploadable1 = function(progressHandler, cb) {
 };
 
 Entry.prototype.getUploadableDoubleEnc = function(progressHandler, cb) {
+	throw "TODO Adjust for this.sub == null";
 	if (!this.options.topSrt)
 		return void this.getUploadable1(progressHandler, cb);
 	const sp = path.join(
@@ -323,7 +327,7 @@ Entry.prototype.getUploadable = function(progressHandler, cb) {
 
 // ffmpeg -itsoffset 2 -i subtitles.srt -c copy subtitles_delayed.srt
 Entry.prototype.adjustSub = function(cb) {
-	if (!this.options.delay || (this.options.delay == 0))
+	if (!this.options.delay || (this.options.delay == 0) || !this.sub)
 		return void cb(null, this.sub);
 	const tmpPath = path.join(this.getTmpDirPath(), this.getName() + ".srt");
 	let cmd = this.getFfmpegSync().concat(
@@ -398,28 +402,31 @@ Entry.prototype.getFfmpegSync = function() {
 	return process.platform === "win32" ?
 		  [path.join(__dirname, "bin", "ffmpeg.exe")] :
 		  process.platform === "darwin" ?
-		  [path.join(process.execPath, "..", "ffmpeg")] :
+		//[path.join(process.execPath, "..", "ffmpeg")] :
+		  [path.join(__dirname, "lib", "ffmpeg")] :
 		  ["ffmpeg", "-strict", "-2"];
 }
 
 Entry.prototype.getFfmpegCommandSync = function(src, sub, tmp) {
 	let enc = this.options.srtEncoding || "cp1251";
-	let fg = `subtitles=${quoteForFilterGraph(sub)}:charenc=${enc}`;
+	let ff = [];
+	if (sub)
+		ff.push(`subtitles=${quoteForFilterGraph(sub)}:charenc=${enc}`);
 	if (this.topSrt) {
 		if (this.topSrt.sid) {
-			fg += `,subtitles=${quoteForFilterGraph(src)}:\
-stream_index=${this.topSrt.sid}:`;
+			ff.push(`subtitles=${quoteForFilterGraph(src)}:\
+stream_index=${this.topSrt.sid}:`);
 		} else {
-			fg += `,subtitles=${quoteForFilterGraph(this.topSrt)}:`;
+			ff.push(`subtitles=${quoteForFilterGraph(this.topSrt)}:`);
 		}
 		const enc = this.options.topSrtEncoding || "cp1251";
-		fg += `force_style='Alignment=6':charenc=${enc}`;
+		ff[ff.length - 1] += `force_style='Alignment=6':charenc=${enc}`;
 	}
 	let cmd = this.getFfmpegSync();
 	if (this.options.ffmpeg && this.options.ffmpeg.input)
 		cmd = cmd.concat(this.options.ffmpeg.input.split(" "));
 	cmd = cmd.concat([
-		"-i", path.resolve(src), "-vf", fg, "-y", "-nostdin"]);
+		"-i", path.resolve(src), "-vf", ff.join(","), "-y", "-nostdin"]);
 	if (this.options.ffmpeg && this.options.ffmpeg.output)
 		cmd = cmd.concat(this.options.ffmpeg.output.split(" "));
 	cmd.push(tmp);
@@ -450,7 +457,7 @@ Entry.prototype.getHardsubCopyDoneWithProgress = function(
 		if (e)
 			return void cb(e);
 		let options = {stdio: ["inherit", "inherit", "pipe"]}, cmd, prog;
-		if (this.options.cd) {
+		if (this.options.cd && sub) {
 			// If quoting breaks again use this
 			options.cwd = path.dirname(sub);
 			sub = path.basename(sub);
@@ -530,7 +537,7 @@ Entry.prototype.getDescription = function(video, cb) {
 };
 
 Entry.prototype.getSubtitle = function(cb) {
-	if (this.sub || "none" === this.options.srt)
+	if (this.sub || "none" === this.options.srt || !this.options.srt)
 		return void cb(null, this.sub);
 	if (this.options.embedded) {
 		if (this.options.srtDir)
@@ -557,10 +564,17 @@ Entry.prototype.getTopSubtitle = function(cb) {
 	if (this.options.topSrt.file)
 		return void cb(null, this.topSrt = path.join(
 			path.dirname(this.path), this.options.topSrt.file));
-	if (!this.options.topSrt.dir)
-		return void cb(new Error(
-			`topSrt option needs to have 'dir' or 'sid' subkey`));
-	const d = path.join(this.options.configDir, this.options.topSrt.dir);
+	let d;
+	if (this.options.topSrt.dir) {
+		d = path.join(
+			this.options.configDir, this.options.topSrt.dir);
+	} else {
+		if ("none" === this.options.srt || !this.options.srt)
+			d = path.dirname(this.path);
+		else
+			return void cb(new Error(
+				`topSrt option needs to have 'dir' or 'sid' subkey`));
+	}
 	this.getSubtitleNameFrom(d, (e, filename) => {
 		if (e)
 			return void cb(e);
@@ -662,8 +676,15 @@ function SocArrange(options) {
 }
 
 SocArrange.prototype.verbFromProgram = function(prog, message) {
-	verb(
-		"%s [%d/%d]: %s", prog, this.currentIndex, this.work.length, message);
+	let m = util.format(
+		"%s [%d/%d]: %j", prog.replace(__dirname, "@"),
+		this.currentIndex, this.work.length,
+		message.replace(/\s+$/, ""));
+	if (message.match("^frame="))
+		m += "\r";
+	else
+		m += "\n"
+	process.stderr.write(m);
 };
 
 SocArrange.prototype.openBrowser = function(cb) {
@@ -1004,6 +1025,8 @@ SocArrange.prototype.doUpload = function(target, tmpPath, cb) {
 	options.path = options.pathname + options.search;
 	delete options.pathname;
 	delete options.search;
+	delete options.query;
+	delete options.href;
 	console.error("upload %j", options);
 	options.headers = {
 		"Content-Type": `multipart/form-data; boundary=${boundary}`
@@ -1011,7 +1034,7 @@ SocArrange.prototype.doUpload = function(target, tmpPath, cb) {
 	const req = https.request(options);
 	req.write(`--${boundary}\r\n`);
 	req.write(
-		`Content-Disposition: form-data; name="file"; filename="${tmpPath}"\r\n`);
+		`Content-Disposition: form-data; name="video_file"; filename="${tmpPath}"\r\n`);
 	req.write(
 		`Content-Type: application/octet-stream\r\n\r\n`);
 	fs.stat(tmpPath, (e, st) => {
@@ -1028,8 +1051,10 @@ SocArrange.prototype.doUpload = function(target, tmpPath, cb) {
 		}).pipe(req, {end: false});
 	});
 	req.on("response", res => {
-		let msg = `Upload status=${res.statusCode} ${res.statusMessage}`;
+		let msg = `Upload status=${res.statusCode} "${res.statusMessage}"`;
 		console.error(msg);
+		console.error("headers=%j", res.headers);
+		res.pipe(process.stderr);
 		if (res.statusCode >= 400)
 			return void(cb(msg));
 		cb(null);
@@ -1261,7 +1286,7 @@ SocArrange.prototype.method = function(name) {
 		}
 		this.lastReqTime = new Date;
 		query.access_token = this.options.token;
-		query.v = "5.52";
+		query.v = "5.81";
 		const options = {
 			host: "api.vk.com",
 			path: `/method/${name}?${querystring.stringify(query)}`};
