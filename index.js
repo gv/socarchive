@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 "use strict"
 const options = require("./lib/commander.js").
 	  description("A script to make hardsubs & upload them to vk.com").
