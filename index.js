@@ -19,6 +19,7 @@ const options = require("./lib/commander.js").
 	  option("--verbose, -v", "Verbose").
 	  option("--copy", "Copy source videos to temp dir before encoding").
 	  option("--updatedescriptions", "Update descriptions").
+	  option("--gu <path>", "Get uploadable file").
 	  /*
 	  option(
 		  "--rename-subs",
@@ -68,10 +69,8 @@ Description.prototype.setPart = function(name, text) {
 };
 
 function Entry(ep, dir, options) {
-	/*
 	if (!new.target)
 		return new Entry(ep, dir, options);
-	*/
 	this.parts = ep.split(new RegExp(`\\${path.sep}+`, "g"));
 	this.path = ep;
 	this.options = options;
@@ -297,7 +296,7 @@ Entry.prototype.getUploadableDoubleEnc = function(progressHandler, cb) {
 		this.getUploadable1(progressHandler, (e, hard1) => {
 			if (e || !this.options.topSrt)
 				return void cb(e, hard1);
-			this.getHardsubCopyDoneWithProgress(
+			this.getHardsubNoCopyWithProgress(
 				hard1, path.join(sp, sn2) + ":force_style='Alignment=6'",
 				progressHandler, (e, h2) => {
 					this.releaseUploadable(hard1);
@@ -370,7 +369,7 @@ Entry.prototype.deleteTmpFileSync = function(tmp) {
 Entry.prototype.getHardsubForFullPathWithProgress = function(
 	sub, progressHandler, cb) {
 	if (!this.options.copy)
-		return void this.getHardsubCopyDoneWithProgress(
+		return void this.getHardsubNoCopyWithProgress(
 			this.path, sub, progressHandler, cb);
 	const tmp = path.join(this.getTmpDirPath(), this.getName() + ".copy.mp4");
 	fs.stat(this.path, (e, st) => {
@@ -385,7 +384,7 @@ Entry.prototype.getHardsubForFullPathWithProgress = function(
 			on("close", (code, sig) => {
 				if(code || sig)
 					return void cb(new RuntimeError(code || sig));
-				this.getHardsubCopyDoneWithProgress(
+				this.getHardsubNoCopyWithProgress(
 					tmp, sub, progressHandler, cb);
 			});
 	});
@@ -435,17 +434,37 @@ stream_index=${this.topSrt.sid}:`);
 };
 
 Entry.prototype.getMencoderCommandSync = function(src, sub, out) {
-	let cmd = [
-		(process.platform === "win32" ?
-		 path.resolve(__filename, "..", "lib", "mencoder.exe") : "mencoder"),
-		src, "-oac", "copy", "-ovc", "copy", "-o", out];
-	if (path.basename(sub) != path.basename(src)) {
-		cmd = cmd.concat(["-sub", sub]);
+	const vp = x => path.dirname(x) + ":" + path.dirname(x);
+	const isHb = 1;
+	let cmd = process.platform === "win32" ?
+		[path.resolve(__filename, "..", "lib", "mencoder.exe")] :
+		["docker", "run", "--rm", 
+		 "-v", vp(src), "-v", vp(sub), "-v", vp(out),
+		 "--entrypoint", isHb ? "/bin/HandBrakeCLI": "/bin/mencoder",
+		 "-t", "ivonet/mediatools"];
+	if (this.isDvdSync()) {
+		if (isHb) {
+			cmd = cmd.concat([
+				"-i", src, "-o", out, "-a2",
+				"--subtitle-burned=2"]);
+		} else {
+		cmd = cmd.concat([
+			"-dvd-device", path.join(this.path, "VIDEO_TS"), "dvd://1",
+			"-vobsubout", "subs", "-vobsuboutindex", "0", "-sid", "1",
+			"-aid", "129", src, "-o", out,
+			"-oac", "lavc", "-ovc", "lavc"]);
+		}
+	} else {
+		cmd = cmd.concat(
+			[src, "-oac", "copy", "-ovc", "copy", "-o", out]);
+		if (path.basename(sub) != path.basename(src)) {
+			cmd = cmd.concat(["-sub", sub]);
+		}
 	}
 	return cmd.concat(this.options.mencoder || [])
-};
+};                           
 
-Entry.prototype.getHardsubCopyDoneWithProgress = function(
+Entry.prototype.getHardsubNoCopyWithProgress = function(
 	src, sub, progressHandler, cb) {
 	const tmp = this.options.save ? (
 		this.options.configDir ?
@@ -465,7 +484,7 @@ Entry.prototype.getHardsubCopyDoneWithProgress = function(
 		}
 		if (this.options.verbose)
 			options.stdio[2] = "inherit";
-		if (process.platform === "win32")
+		if (process.platform === "win32" || this.isDvdSync())
 			cmd = this.getMencoderCommandSync(src, sub, tmp);
 		else
 			cmd = this.getFfmpegCommandSync(src, sub, tmp);
@@ -652,6 +671,10 @@ Entry.prototype.listSubtitlesIn = function(dir, cb) {
 	});
 };
 
+Entry.prototype.isDvdSync = function() {
+	return fs.existsSync(path.join(this.path, "VIDEO_TS"));
+};
+
 const spawn = function(prog, args, options, cb) {
 	console.error("Running %j %j", prog, args);
 	const e = new Error();
@@ -689,14 +712,14 @@ SocArrange.prototype.verbFromProgram = function(prog, message) {
 };
 
 SocArrange.prototype.openBrowser = function(cb) {
-	let url = `https://oauth.vk.com/authorize?client_id=7505964&\
+	let url = `https://oauth.vk.com/authorize?client_id=51820460q&\
 display=page&redirect_uri=https://oauth.vk.com/blank.html&\
 scope=video,friends&response_type=token&v=5.52`;
 	spawn("open", [url], {stdio: [0, 1, 2]});
 };
 
 SocArrange.prototype.run = function(cb) {
-	this.runIfAccessOk(e => {
+	this.runOrOpenBrowser(e => {
 		if(e && 5 === e.error_code) {
 			console.error("Received error: %j", e);
 			return void this.openBrowser(cb);
@@ -705,7 +728,7 @@ SocArrange.prototype.run = function(cb) {
 	})
 };
 
-SocArrange.prototype.runIfAccessOk = function(cb) {
+SocArrange.prototype.runOrOpenBrowser = function(cb) {
 	if (this.options.open) {
 		if (this.options.move || this.options.remove) {
 			console.error(
@@ -713,6 +736,13 @@ SocArrange.prototype.runIfAccessOk = function(cb) {
 			process.exit(1);
 		}
 		return void this.openBrowser(cb);
+	}
+
+	if (this.options.gu) {
+		this.options.save = path.dirname(this.options.gu);
+		this.work = [Entry(
+			this.options.gu, this.options.save, this.options)];
+		return void this.work[0].getUploadable(this, cb);
 	}
 
 	if (!this.options.token) {
@@ -749,8 +779,8 @@ SocArrange.prototype.runIfAccessOk = function(cb) {
 			return void cb(new TypeError("\
 Uploading without subtitles disabled; to \
 engage embedded subs, use --embedded --srt LANG")); 
-		this.loadArchiveState(cb);
 		this.loadFiles(cb);
+		this.loadArchiveState(cb);
 	}
 };
 
@@ -779,6 +809,12 @@ SocArrange.prototype.loadArchiveState = function(cb) {
 		this.albums = albums;
 		this.handleLoadComplete(null, cb);
 	});
+};
+
+SocArrange.prototype.loadArchiveState = function(cb) {
+	// Temp
+	this.albums = {};
+	this.uploadEverything(cb);
 };
 
 SocArrange.prototype.loadFiles = function(cb) {
